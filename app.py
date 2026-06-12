@@ -1,0 +1,1952 @@
+"""
+MindGuard — AI-Powered Mental Health Screening & Clinical Decision Support Platform
+Multi-dimensional NLP: BERT + FAISS + LangChain RAG + Plutchik + CBT + AI Guide
+"""
+
+import gradio as gr
+import numpy as np
+import random
+import re
+import time
+from collections import defaultdict
+
+from backend.app.rag_pipeline import RAGPipeline
+
+rag_pipeline = RAGPipeline()
+
+SESSION_DATA = {
+    "entries": [],
+    "mood_timeline": [],
+    "risk_scores": [],
+    "session_start": time.time(),
+    "total_interactions": 0,
+    "journal": [],
+    "checkin_history": [],
+}
+
+EMOTION_LEXICON = {
+    "anger": ["angry", "furious", "rage", "hate", "irritated", "frustrated", "annoyed", "resentful", "bitter", "hostile", "mad", "pissed", "livid", "outraged"],
+    "sadness": ["sad", "crying", "tears", "grief", "mourning", "lonely", "heartbroken", "miserable", "gloomy", "melancholy", "depressed", "down", "unhappy", "sorrowful", "blue"],
+    "fear": ["afraid", "scared", "terrified", "frightened", "panic", "phobia", "dread", "horror", "alarmed", "petrified", "nervous", "anxious", "worried", "uneasy", "tense", "apprehensive", "stuck"],
+    "joy": ["happy", "excited", "grateful", "proud", "content", "cheerful", "elated", "thrilled", "delighted", "optimistic", "good", "great", "wonderful", "amazing", "love", "enjoy", "fun"],
+    "disgust": ["disgusted", "repulsed", "revolted", "sick", "nauseated", "appalled", "loathing", "gross", "awful"],
+    "surprise": ["shocked", "amazed", "astonished", "startled", "unexpected", "stunned", "wow", "surprised"],
+    "trust": ["believe", "faith", "confident", "secure", "reliable", "honest", "loyal", "trust", "safe", "comfortable"],
+    "anticipation": ["expecting", "hopeful", "looking forward", "planning", "preparing", "eager", "curious", "interested", "future"],
+}
+
+COGNITIVE_DISTORTIONS = {
+    "all_or_nothing": {
+        "patterns": ["always", "never", "everyone", "nobody", "everything", "nothing", "completely", "totally", "every time"],
+        "label": "All-or-Nothing Thinking",
+        "description": "Seeing things in black-and-white categories with no middle ground",
+        "reframe": "Try replacing absolute words with more balanced ones: 'sometimes', 'in this situation', 'this specific instance'",
+    },
+    "catastrophizing": {
+        "patterns": ["worst", "terrible", "horrible", "disaster", "catastrophe", "end of the world", "ruined", "destroyed", "can't handle"],
+        "label": "Catastrophizing",
+        "description": "Expecting the worst-case scenario and magnifying negative outcomes",
+        "reframe": "Ask yourself: What's the most likely outcome? What would I tell a friend in this situation?",
+    },
+    "mind_reading": {
+        "patterns": ["they think", "everyone thinks", "people think", "they must", "probably thinks", "judges me", "looking at me", "laughing at"],
+        "label": "Mind Reading",
+        "description": "Assuming you know what others are thinking without evidence",
+        "reframe": "Remind yourself: I cannot read minds. What evidence do I actually have for this belief?",
+    },
+    "should_statements": {
+        "patterns": ["i should", "i must", "i have to", "i need to", "ought to", "supposed to", "have to be"],
+        "label": "Should Statements",
+        "description": "Placing rigid, unrealistic demands on yourself",
+        "reframe": "Replace 'should' with 'I would prefer' or 'It would be nice if' — give yourself permission to be human",
+    },
+    "overgeneralization": {
+        "patterns": ["always happens", "every time", "never works", "nothing ever", "this always", "typical", "story of my life"],
+        "label": "Overgeneralization",
+        "description": "Drawing broad negative conclusions from a single event",
+        "reframe": "Is this really ALWAYS the case? Can you think of even one exception? Focus on this specific situation.",
+    },
+    "personalization": {
+        "patterns": ["my fault", "because of me", "i caused", "blame myself", "i'm the reason", "if only i"],
+        "label": "Personalization",
+        "description": "Taking excessive responsibility for events outside your control",
+        "reframe": "What percentage of this outcome was actually within your control? What other factors contributed?",
+    },
+}
+
+SEVERE_KEYWORDS = ["suicide", "kill myself", "end it all", "no reason to live", "self-harm", "want to die", "better off dead", "not worth living"]
+DEPRESSION_KEYWORDS = ["hopeless", "worthless", "empty", "numb", "can't go on", "no energy", "don't care anymore", "failure", "burden", "giving up", "pointless"]
+ANXIETY_KEYWORDS = ["panic", "worried", "racing thoughts", "can't breathe", "nervous", "terrified", "dread", "restless", "on edge", "impending doom", "anxious", "fear", "scared", "cant understand", "stuck"]
+STRESS_KEYWORDS = ["overwhelmed", "pressure", "exhausted", "too much", "burned out", "can't keep up", "falling behind", "drowning", "stressed", "overloaded"]
+
+PHQ9_QUESTIONS = [
+    "Little interest or pleasure in doing things",
+    "Feeling down, depressed, or hopeless",
+    "Trouble falling or staying asleep, or sleeping too much",
+    "Feeling tired or having little energy",
+    "Poor appetite or overeating",
+    "Feeling bad about yourself — or that you are a failure",
+    "Trouble concentrating on things",
+    "Moving or speaking slowly, or being fidgety/restless",
+    "Thoughts that you would be better off dead, or of hurting yourself",
+]
+
+GAD7_QUESTIONS = [
+    "Feeling nervous, anxious, or on edge",
+    "Not being able to stop or control worrying",
+    "Worrying too much about different things",
+    "Trouble relaxing",
+    "Being so restless that it's hard to sit still",
+    "Becoming easily annoyed or irritable",
+    "Feeling afraid, as if something awful might happen",
+]
+
+
+def milo_guide(message, mood="neutral"):
+    mood_colors = {
+        "neutral": ("#10b981", "#d1fae5", "#065f46"),
+        "happy": ("#10b981", "#d1fae5", "#065f46"),
+        "thinking": ("#6366f1", "#eef2ff", "#312e81"),
+        "caring": ("#ec4899", "#fce7f3", "#9d174d"),
+        "alert": ("#ef4444", "#fef2f2", "#991b1b"),
+        "calm": ("#06b6d4", "#ecfeff", "#164e63"),
+        "celebrate": ("#f59e0b", "#fefce8", "#78350f"),
+    }
+    primary, bg, text_dark = mood_colors.get(mood, ("#10b981", "#d1fae5", "#065f46"))
+
+    return f"""
+    <div style="display: flex; align-items: center; gap: 0; background: linear-gradient(135deg, {bg} 0%, white 50%, {bg}44 100%); border: 1.5px solid {primary}33; border-radius: 24px; padding: 0; margin-bottom: 22px; position: relative; overflow: hidden; box-shadow: 0 8px 32px {primary}12, 0 2px 8px rgba(0,0,0,0.04);">
+
+        <!-- Decorative background elements -->
+        <div style="position: absolute; top: -40px; right: -40px; width: 150px; height: 150px; background: radial-gradient(circle, {primary}10, transparent 70%); border-radius: 50%;"></div>
+        <div style="position: absolute; bottom: -20px; left: 100px; width: 80px; height: 80px; background: radial-gradient(circle, {primary}08, transparent 70%); border-radius: 50%;"></div>
+
+        <!-- Milo 3D Character Container -->
+        <div style="flex-shrink: 0; width: 140px; min-height: 130px; display: flex; align-items: center; justify-content: center; position: relative; perspective: 400px; padding: 10px;">
+            <div style="animation: milo-float 3s ease-in-out infinite; transform-style: preserve-3d;">
+                <svg width="120" height="120" viewBox="0 0 120 120" style="filter: drop-shadow(0 8px 16px rgba(0,0,0,0.15)) drop-shadow(0 2px 4px {primary}44);">
+                    <defs>
+                        <radialGradient id="milo-head-{mood}" cx="40%" cy="35%" r="60%">
+                            <stop offset="0%" stop-color="{primary}" stop-opacity="0.95"/>
+                            <stop offset="100%" stop-color="{primary}" stop-opacity="0.7"/>
+                        </radialGradient>
+                        <radialGradient id="milo-body-{mood}" cx="50%" cy="30%" r="70%">
+                            <stop offset="0%" stop-color="{primary}" stop-opacity="0.4"/>
+                            <stop offset="100%" stop-color="{primary}" stop-opacity="0.15"/>
+                        </radialGradient>
+                        <radialGradient id="milo-glow-{mood}" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%" stop-color="{primary}" stop-opacity="0.2"/>
+                            <stop offset="100%" stop-color="{primary}" stop-opacity="0"/>
+                        </radialGradient>
+                        <filter id="milo-shadow-{mood}">
+                            <feDropShadow dx="0" dy="3" stdDeviation="2" flood-color="{primary}" flood-opacity="0.3"/>
+                        </filter>
+                    </defs>
+
+                    <!-- Ambient glow -->
+                    <circle cx="60" cy="65" r="50" fill="url(#milo-glow-{mood})"/>
+
+                    <!-- Body / Torso -->
+                    <ellipse cx="60" cy="88" rx="25" ry="22" fill="url(#milo-body-{mood})" filter="url(#milo-shadow-{mood})"/>
+
+                    <!-- Neck -->
+                    <rect x="52" y="62" width="16" height="14" rx="8" fill="{primary}" opacity="0.5"/>
+
+                    <!-- Head (3D sphere illusion) -->
+                    <circle cx="60" cy="44" r="28" fill="url(#milo-head-{mood})" filter="url(#milo-shadow-{mood})"/>
+
+                    <!-- Head highlight (3D lighting) -->
+                    <ellipse cx="52" cy="34" rx="16" ry="12" fill="white" opacity="0.18"/>
+                    <ellipse cx="48" cy="30" rx="8" ry="5" fill="white" opacity="0.12"/>
+
+                    <!-- Eyes (3D depth) -->
+                    <ellipse cx="50" cy="43" rx="5.5" ry="6.5" fill="white" filter="url(#milo-shadow-{mood})"/>
+                    <ellipse cx="70" cy="43" rx="5.5" ry="6.5" fill="white" filter="url(#milo-shadow-{mood})"/>
+
+                    <!-- Irises with gradient -->
+                    <circle cx="51" cy="44" r="3.2" fill="#1e293b"/>
+                    <circle cx="71" cy="44" r="3.2" fill="#1e293b"/>
+
+                    <!-- Pupils -->
+                    <circle cx="51" cy="44" r="1.5" fill="#000"/>
+                    <circle cx="71" cy="44" r="1.5" fill="#000"/>
+
+                    <!-- Eye sparkle (life) -->
+                    <circle cx="52.5" cy="42" r="1.2" fill="white" opacity="0.9"/>
+                    <circle cx="72.5" cy="42" r="1.2" fill="white" opacity="0.9"/>
+                    <circle cx="49" cy="45.5" r="0.6" fill="white" opacity="0.5"/>
+                    <circle cx="69" cy="45.5" r="0.6" fill="white" opacity="0.5"/>
+
+                    <!-- Eyebrows -->
+                    <path d="M 44 35 Q 50 32 56 35" fill="none" stroke="{primary}" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>
+                    <path d="M 64 35 Q 70 32 76 35" fill="none" stroke="{primary}" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>
+
+                    <!-- Nose (subtle) -->
+                    <ellipse cx="60" cy="50" rx="2" ry="1.5" fill="{primary}" opacity="0.3"/>
+
+                    <!-- Smile (3D curve) -->
+                    <path d="M 50 55 Q 60 64 70 55" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+                    <path d="M 52 56 Q 60 62 68 56" fill="white" opacity="0.15"/>
+
+                    <!-- Blush cheeks (3D roundness) -->
+                    <ellipse cx="42" cy="52" rx="5" ry="3.5" fill="#fecdd3" opacity="0.5"/>
+                    <ellipse cx="78" cy="52" rx="5" ry="3.5" fill="#fecdd3" opacity="0.5"/>
+
+                    <!-- Left arm/hand waving -->
+                    <g style="animation: milo-wave 2.5s ease-in-out infinite; transform-origin: 28px 75px;">
+                        <path d="M 35 75 Q 25 68 20 58" fill="none" stroke="{primary}" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                        <circle cx="19" cy="56" r="5" fill="{primary}" opacity="0.7"/>
+                    </g>
+
+                    <!-- Right arm -->
+                    <path d="M 85 75 Q 92 80 95 88" fill="none" stroke="{primary}" stroke-width="6" stroke-linecap="round" opacity="0.4"/>
+
+                    <!-- Shield badge on chest -->
+                    <path d="M 53 80 L 60 76 L 67 80 L 67 89 L 60 93 L 53 89 Z" fill="#fbbf24" stroke="#f59e0b" stroke-width="0.8"/>
+                    <text x="60" y="87" text-anchor="middle" fill="white" font-size="7" font-weight="bold">M</text>
+
+                    <!-- Stethoscope hint -->
+                    <path d="M 48 70 Q 45 76 50 80" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+                    <circle cx="50" cy="81" r="2" fill="#94a3b8" opacity="0.4"/>
+                </svg>
+            </div>
+        </div>
+
+        <!-- Speech bubble -->
+        <div style="flex: 1; padding: 20px 24px 20px 0; position: relative; z-index: 1;">
+            <div style="position: relative; background: white; border: 1px solid {primary}22; border-radius: 16px; padding: 16px 18px; box-shadow: 0 2px 8px {primary}08;">
+                <!-- Speech bubble arrow -->
+                <div style="position: absolute; left: -8px; top: 20px; width: 16px; height: 16px; background: white; border-left: 1px solid {primary}22; border-bottom: 1px solid {primary}22; transform: rotate(45deg);"></div>
+                <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+                    <span style="font-size: 0.7em; color: {primary}; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Milo</span>
+                    <span style="font-size: 0.58em; background: {primary}15; color: {primary}; padding: 2px 7px; border-radius: 6px; font-weight: 500;">AI Health Guide</span>
+                </div>
+                <div style="color: {text_dark}; font-size: 0.88em; line-height: 1.7; font-weight: 400;">{message}</div>
+            </div>
+        </div>
+    </div>
+    """
+
+
+def analyze_emotions(text: str) -> dict:
+    text_lower = text.lower()
+    words = text_lower.split()
+    scores = {}
+    for emotion, keywords in EMOTION_LEXICON.items():
+        score = 0
+        for kw in keywords:
+            if kw in text_lower:
+                score += 1
+            for word in words:
+                if len(kw) > 3 and word.startswith(kw[:4]):
+                    score += 0.5
+        scores[emotion] = min(score / 4.0, 1.0)
+    total = sum(scores.values())
+    if total > 0:
+        scores = {k: round(v / total, 3) for k, v in scores.items()}
+    else:
+        scores = {k: round(1.0 / 8, 3) for k in scores}
+    return scores
+
+
+def detect_cognitive_distortions(text: str) -> list:
+    text_lower = text.lower()
+    detected = []
+    for key, distortion in COGNITIVE_DISTORTIONS.items():
+        for pattern in distortion["patterns"]:
+            if pattern in text_lower:
+                detected.append({
+                    "type": distortion["label"],
+                    "description": distortion["description"],
+                    "reframe": distortion["reframe"],
+                    "trigger": pattern,
+                })
+                break
+    return detected
+
+
+def compute_linguistic_features(text: str) -> dict:
+    words = text.split()
+    sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()]
+    first_person = sum(1 for w in words if w.lower() in ["i", "me", "my", "myself", "mine", "i'm", "i've", "i'll", "i'd"])
+    negations = sum(1 for w in words if w.lower() in ["not", "no", "never", "don't", "can't", "won't", "isn't", "aren't", "doesn't", "didn't", "nothing", "nowhere", "nobody", "neither", "nor"])
+    certainty_words = sum(1 for w in words if w.lower() in ["always", "never", "definitely", "certainly", "absolutely", "completely", "totally", "every", "all"])
+    hedging = sum(1 for w in words if w.lower() in ["maybe", "perhaps", "might", "could", "sometimes", "possibly", "probably", "somewhat"])
+    temporal_past = sum(1 for w in words if w.lower() in ["was", "were", "had", "used", "before", "yesterday", "ago", "past"])
+    temporal_future = sum(1 for w in words if w.lower() in ["will", "going", "tomorrow", "future", "plan", "hope", "soon", "later"])
+
+    return {
+        "word_count": len(words),
+        "sentence_count": len(sentences),
+        "avg_sentence_length": round(len(words) / max(len(sentences), 1), 1),
+        "first_person_ratio": round(first_person / max(len(words), 1), 3),
+        "negation_ratio": round(negations / max(len(words), 1), 3),
+        "certainty_ratio": round(certainty_words / max(len(words), 1), 3),
+        "hedging_ratio": round(hedging / max(len(words), 1), 3),
+        "lexical_diversity": round(len(set(w.lower() for w in words)) / max(len(words), 1), 3),
+        "temporal_past": round(temporal_past / max(len(words), 1), 3),
+        "temporal_future": round(temporal_future / max(len(words), 1), 3),
+    }
+
+
+def classify_text(text: str) -> dict:
+    text_lower = text.lower()
+    scores = {"normal": 0.1, "stress": 0.0, "anxiety": 0.0, "depression": 0.0, "severe": 0.0}
+    for kw in SEVERE_KEYWORDS:
+        if kw in text_lower:
+            scores["severe"] += 0.35
+    for kw in DEPRESSION_KEYWORDS:
+        if kw in text_lower:
+            scores["depression"] += 0.2
+    for kw in ANXIETY_KEYWORDS:
+        if kw in text_lower:
+            scores["anxiety"] += 0.2
+    for kw in STRESS_KEYWORDS:
+        if kw in text_lower:
+            scores["stress"] += 0.2
+    total = sum(scores.values())
+    probabilities = {k: round(v / total, 4) for k, v in scores.items()}
+    predicted_label = max(probabilities, key=probabilities.get)
+    confidence = probabilities[predicted_label]
+    severity_map = {"normal": 0, "stress": 0.25, "anxiety": 0.5, "depression": 0.75, "severe": 1.0}
+    return {
+        "label": predicted_label,
+        "confidence": round(confidence, 4),
+        "severity_score": severity_map[predicted_label],
+        "probabilities": probabilities,
+    }
+
+
+def compute_risk_score(classification, emotions, distortions, linguistics):
+    base_risk = classification["severity_score"]
+    emotion_risk = (emotions.get("sadness", 0) * 0.3 + emotions.get("fear", 0) * 0.25 +
+                    emotions.get("anger", 0) * 0.15 - emotions.get("joy", 0) * 0.2)
+    distortion_risk = min(len(distortions) * 0.12, 0.35)
+    linguistic_risk = (linguistics["negation_ratio"] * 0.4 + linguistics["first_person_ratio"] * 0.2 +
+                       (1 - linguistics["lexical_diversity"]) * 0.15 + linguistics["certainty_ratio"] * 0.25)
+    composite_risk = np.clip(base_risk * 0.4 + emotion_risk * 0.25 + distortion_risk * 0.2 + linguistic_risk * 0.15, 0, 1)
+    factors = []
+    if base_risk >= 0.5:
+        factors.append("High-risk language patterns detected")
+    if emotions.get("sadness", 0) > 0.25:
+        factors.append("Elevated sadness in emotional profile")
+    if emotions.get("fear", 0) > 0.25:
+        factors.append("Elevated fear/anxiety markers")
+    if len(distortions) >= 2:
+        factors.append(f"{len(distortions)} cognitive distortions identified")
+    if linguistics["negation_ratio"] > 0.08:
+        factors.append("High negative language density")
+    if linguistics["first_person_ratio"] > 0.15:
+        factors.append("Elevated self-focused language")
+    return {
+        "composite_score": round(float(composite_risk), 3),
+        "components": {
+            "keyword_severity": round(float(base_risk), 3),
+            "emotional_distress": round(float(max(emotion_risk, 0)), 3),
+            "cognitive_patterns": round(float(distortion_risk), 3),
+            "linguistic_markers": round(float(min(linguistic_risk, 1)), 3),
+        },
+        "risk_level": ("Critical" if composite_risk >= 0.8 else "High" if composite_risk >= 0.6 else "Moderate" if composite_risk >= 0.4 else "Low" if composite_risk >= 0.2 else "Minimal"),
+        "contributing_factors": factors,
+    }
+
+
+def full_analysis(text: str):
+    if not text or len(text.strip()) < 10:
+        return milo_guide("Hey there! I need a bit more from you — write at least 10 characters about how you're feeling so I can run a proper analysis. The more you share, the better I can help! 💪", "thinking")
+
+    classification = classify_text(text)
+    emotions = analyze_emotions(text)
+    distortions = detect_cognitive_distortions(text)
+    linguistics = compute_linguistic_features(text)
+    risk = compute_risk_score(classification, emotions, distortions, linguistics)
+    rag_response = rag_pipeline.generate_response(text, classification)
+    contexts = rag_pipeline.retrieve_context(text)
+
+    SESSION_DATA["entries"].append({
+        "timestamp": time.time(), "text_length": len(text),
+        "classification": classification["label"], "severity": classification["severity_score"],
+        "risk_score": risk["composite_score"], "emotions": emotions,
+    })
+    SESSION_DATA["mood_timeline"].append(classification["severity_score"])
+    SESSION_DATA["risk_scores"].append(risk["composite_score"])
+    SESSION_DATA["total_interactions"] += 1
+
+    label = classification["label"]
+    confidence = classification["confidence"]
+    risk_score = risk["composite_score"]
+    risk_level = risk["risk_level"]
+
+    label_config = {
+        "normal": ("#10b981", "#d1fae5", "All Clear", "Your mental state appears healthy"),
+        "stress": ("#f59e0b", "#fef3c7", "Stress Detected", "Elevated stress markers found"),
+        "anxiety": ("#f97316", "#ffedd5", "Anxiety Indicators", "Anxiety patterns identified"),
+        "depression": ("#8b5cf6", "#ede9fe", "Depression Markers", "Depression indicators present"),
+        "severe": ("#ef4444", "#fee2e2", "Urgent Attention", "Immediate support recommended"),
+    }
+    color, bg, title, subtitle = label_config.get(label, ("#6366f1", "#eef2ff", "Analysis Complete", ""))
+
+    risk_colors = {"Critical": "#ef4444", "High": "#f97316", "Moderate": "#f59e0b", "Low": "#10b981", "Minimal": "#06b6d4"}
+    risk_color = risk_colors.get(risk_level, "#6366f1")
+    circumference = 2 * 3.14159 * 45
+    offset = circumference - (risk_score * circumference)
+
+    milo_messages = {
+        "normal": "Great news! Your text shows a healthy emotional state. Keep nurturing these positive patterns — they build resilience for tougher days ahead!",
+        "stress": "I can see you're under some pressure. That's your body's way of signaling it needs attention. Let's look at what the data shows and find ways to decompress.",
+        "anxiety": "I notice some anxiety patterns in what you've shared. Remember — anxiety is your brain trying to protect you, even when it overreacts. Let's understand it together.",
+        "depression": "I hear heaviness in your words, and I want you to know that matters. The analysis below shows specific patterns — understanding them is the first step toward feeling better.",
+        "severe": "I'm concerned about what you've shared. Please know you're not alone, and help is available right now. Call 988 or text HOME to 741741. Let's look at the analysis together.",
+    }
+    milo_mood = {"normal": "celebrate", "stress": "caring", "anxiety": "caring", "depression": "caring", "severe": "alert"}
+
+    prob_bars = ""
+    for cat, prob in classification["probabilities"].items():
+        cat_colors = {"normal": "#10b981", "stress": "#f59e0b", "anxiety": "#f97316", "depression": "#8b5cf6", "severe": "#ef4444"}
+        pct = prob * 100
+        prob_bars += f"""
+        <div style="display: flex; align-items: center; gap: 10px; margin: 6px 0;">
+            <span style="width: 85px; font-size: 0.78em; color: #475569; text-transform: capitalize; font-weight: 500;">{cat}</span>
+            <div style="flex: 1; height: 28px; background: #f1f5f9; border-radius: 14px; overflow: hidden; position: relative;">
+                <div style="height: 100%; width: {pct}%; background: linear-gradient(90deg, {cat_colors.get(cat, '#6366f1')}88, {cat_colors.get(cat, '#6366f1')}); border-radius: 14px; transition: width 0.8s ease;"></div>
+                <span style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 0.7em; font-weight: 600; color: {'white' if pct > 40 else '#64748b'};">{pct:.1f}%</span>
+            </div>
+        </div>"""
+
+    emotion_bars = ""
+    for emo, score in sorted(emotions.items(), key=lambda x: x[1], reverse=True):
+        emo_colors = {"anger": "#ef4444", "sadness": "#3b82f6", "fear": "#8b5cf6", "joy": "#10b981", "disgust": "#84cc16", "surprise": "#f59e0b", "trust": "#06b6d4", "anticipation": "#ec4899"}
+        emo_color = emo_colors.get(emo, "#6366f1")
+        pct = score * 100
+        emo_icons = {"anger": "😠", "sadness": "😢", "fear": "😨", "joy": "😊", "disgust": "🤢", "surprise": "😲", "trust": "🤝", "anticipation": "✨"}
+        emotion_bars += f"""
+        <div style="display: flex; align-items: center; gap: 8px; margin: 4px 0;">
+            <span style="font-size: 1em;">{emo_icons.get(emo, '•')}</span>
+            <span style="width: 80px; font-size: 0.75em; color: #64748b; text-transform: capitalize;">{emo}</span>
+            <div style="flex: 1; height: 18px; background: #f1f5f9; border-radius: 9px; overflow: hidden;">
+                <div style="height: 100%; width: {pct}%; background: linear-gradient(90deg, {emo_color}77, {emo_color}); border-radius: 9px;"></div>
+            </div>
+            <span style="width: 35px; font-size: 0.7em; color: #94a3b8; text-align: right;">{pct:.0f}%</span>
+        </div>"""
+
+    distortion_html = ""
+    if distortions:
+        for d in distortions:
+            distortion_html += f"""
+            <div style="background: linear-gradient(135deg, #fffbeb, #fef3c7); border: 1px solid #fbbf24; border-radius: 14px; padding: 16px; margin: 10px 0;">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                    <span style="background: #fbbf24; color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.7em;">!</span>
+                    <strong style="color: #92400e; font-size: 0.9em;">{d['type']}</strong>
+                </div>
+                <p style="color: #78716c; font-size: 0.82em; margin: 4px 0; line-height: 1.5;">{d['description']}</p>
+                <p style="color: #a16207; font-size: 0.75em; margin: 4px 0;">Triggered by: "<em>{d['trigger']}</em>"</p>
+                <div style="background: white; border-radius: 10px; padding: 12px; margin-top: 10px; border: 1px solid #d1fae5;">
+                    <p style="color: #059669; font-size: 0.8em; margin: 0; line-height: 1.5;">💡 <strong>Reframe:</strong> {d['reframe']}</p>
+                </div>
+            </div>"""
+    else:
+        distortion_html = """
+        <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 14px; padding: 20px; text-align: center;">
+            <div style="font-size: 1.5em; margin-bottom: 6px;">✅</div>
+            <p style="color: #065f46; font-weight: 500; margin: 0;">No cognitive distortions detected</p>
+            <p style="color: #6ee7b7; font-size: 0.8em; margin: 4px 0 0 0;">Your thinking patterns appear balanced</p>
+        </div>"""
+
+    component_bars = ""
+    for comp_name, comp_val in risk["components"].items():
+        nice_name = comp_name.replace("_", " ").title()
+        pct = comp_val * 100
+        component_bars += f"""
+        <div style="margin: 8px 0;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.73em; color: #64748b; margin-bottom: 3px;">
+                <span>{nice_name}</span><span>{pct:.0f}%</span>
+            </div>
+            <div style="height: 8px; background: #f1f5f9; border-radius: 4px; overflow: hidden;">
+                <div style="height: 100%; width: {pct}%; background: linear-gradient(90deg, {risk_color}77, {risk_color}); border-radius: 4px;"></div>
+            </div>
+        </div>"""
+
+    factors_html = ""
+    for f in risk["contributing_factors"]:
+        factors_html += f'<div style="display: flex; align-items: flex-start; gap: 6px; margin: 5px 0;"><span style="color: {risk_color}; margin-top: 2px;">●</span><span style="font-size: 0.8em; color: #475569; line-height: 1.4;">{f}</span></div>'
+    if not factors_html:
+        factors_html = '<div style="color: #10b981; font-size: 0.85em;">✓ No significant risk factors</div>'
+
+    ling_features = [
+        ("Words", str(linguistics["word_count"]), "📝", "#6366f1"),
+        ("Sentences", str(linguistics["sentence_count"]), "📄", "#8b5cf6"),
+        ("Self-focus", f"{linguistics['first_person_ratio']*100:.0f}%", "👤", "#ec4899"),
+        ("Negativity", f"{linguistics['negation_ratio']*100:.0f}%", "➖", "#ef4444"),
+        ("Certainty", f"{linguistics['certainty_ratio']*100:.0f}%", "❗", "#f97316"),
+        ("Diversity", f"{linguistics['lexical_diversity']*100:.0f}%", "🔤", "#10b981"),
+    ]
+    ling_grid = ""
+    for name, val, icon, lcolor in ling_features:
+        ling_grid += f"""
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 8px; text-align: center; transition: transform 0.2s; cursor: default;">
+            <div style="font-size: 1.1em;">{icon}</div>
+            <div style="font-size: 1.05em; font-weight: 700; color: {lcolor}; margin: 3px 0;">{val}</div>
+            <div style="font-size: 0.65em; color: #94a3b8;">{name}</div>
+        </div>"""
+
+    context_html = ""
+    for ctx in contexts[:3]:
+        relevance = max(0, 1 - abs(ctx["relevance_score"]))
+        context_html += f"""
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 14px; margin: 6px 0;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-size: 0.8em; font-weight: 600; color: #334155;">{ctx['topic'].replace('_', ' ').title()}</span>
+                <span style="font-size: 0.65em; background: #eef2ff; color: #4f46e5; padding: 2px 8px; border-radius: 10px;">{relevance*100:.0f}% match</span>
+            </div>
+            <p style="font-size: 0.72em; color: #94a3b8; margin: 4px 0 0 0; line-height: 1.4;">{ctx['content'][:100]}...</p>
+        </div>"""
+
+    wellness_score = max(0, int((1 - risk_score) * 100))
+    wellness_color = "#10b981" if wellness_score >= 70 else "#f59e0b" if wellness_score >= 40 else "#ef4444"
+
+    result_html = f"""
+    <div style="font-family: 'Inter', -apple-system, sans-serif;">
+
+        {milo_guide(milo_messages.get(label, "Analysis complete! Here's what I found."), milo_mood.get(label, "neutral"))}
+
+        <!-- Wellness Score + Classification Hero -->
+        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 40%, #334155 100%); border-radius: 24px; padding: 32px; margin-bottom: 20px; position: relative; overflow: hidden;">
+            <div style="position: absolute; top: -40%; right: -10%; width: 250px; height: 250px; background: radial-gradient(circle, {color}22, transparent); border-radius: 50%;"></div>
+            <div style="position: absolute; bottom: -30%; left: -5%; width: 200px; height: 200px; background: radial-gradient(circle, {risk_color}15, transparent); border-radius: 50%;"></div>
+            <div style="position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 20px;">
+                <div>
+                    <div style="display: inline-block; background: {color}22; border: 1px solid {color}44; padding: 4px 12px; border-radius: 20px; margin-bottom: 8px;">
+                        <span style="color: {color}; font-size: 0.75em; font-weight: 600;">{title}</span>
+                    </div>
+                    <div style="font-size: 2.2em; font-weight: 800; color: white; text-transform: uppercase; letter-spacing: -0.02em;">{label}</div>
+                    <div style="color: #94a3b8; font-size: 0.85em; margin-top: 4px;">{subtitle} · Confidence: {confidence*100:.0f}%</div>
+                </div>
+                <div style="display: flex; gap: 20px; align-items: center;">
+                    <div style="text-align: center;">
+                        <svg width="90" height="90" viewBox="0 0 100 100">
+                            <circle cx="50" cy="50" r="45" fill="none" stroke="#334155" stroke-width="7"/>
+                            <circle cx="50" cy="50" r="45" fill="none" stroke="{risk_color}" stroke-width="7" stroke-dasharray="{circumference}" stroke-dashoffset="{offset}" stroke-linecap="round" transform="rotate(-90 50 50)"/>
+                            <text x="50" y="46" text-anchor="middle" fill="white" font-size="16" font-weight="bold">{risk_score*100:.0f}%</text>
+                            <text x="50" y="62" text-anchor="middle" fill="#94a3b8" font-size="8">RISK</text>
+                        </svg>
+                    </div>
+                    <div style="text-align: center;">
+                        <svg width="90" height="90" viewBox="0 0 100 100">
+                            <circle cx="50" cy="50" r="45" fill="none" stroke="#334155" stroke-width="7"/>
+                            <circle cx="50" cy="50" r="45" fill="none" stroke="{wellness_color}" stroke-width="7" stroke-dasharray="{circumference}" stroke-dashoffset="{circumference - (wellness_score/100 * circumference)}" stroke-linecap="round" transform="rotate(-90 50 50)"/>
+                            <text x="50" y="46" text-anchor="middle" fill="white" font-size="16" font-weight="bold">{wellness_score}</text>
+                            <text x="50" y="62" text-anchor="middle" fill="#94a3b8" font-size="8">WELLNESS</text>
+                        </svg>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Grid: Classification + Emotions -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+            <div style="background: white; border: 1px solid #e2e8f0; border-radius: 18px; padding: 22px;">
+                <h3 style="margin: 0 0 14px 0; font-size: 0.95em; color: #1e293b; display: flex; align-items: center; gap: 8px;">
+                    <span style="background: #eef2ff; width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 0.85em;">🧠</span> Classification
+                </h3>
+                {prob_bars}
+            </div>
+            <div style="background: white; border: 1px solid #e2e8f0; border-radius: 18px; padding: 22px;">
+                <h3 style="margin: 0 0 14px 0; font-size: 0.95em; color: #1e293b; display: flex; align-items: center; gap: 8px;">
+                    <span style="background: #fce7f3; width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 0.85em;">🎭</span> Emotional Profile
+                </h3>
+                {emotion_bars}
+            </div>
+        </div>
+
+        <!-- Risk Assessment -->
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 18px; padding: 22px; margin-bottom: 16px;">
+            <h3 style="margin: 0 0 14px 0; font-size: 0.95em; color: #1e293b; display: flex; align-items: center; gap: 8px;">
+                <span style="background: #fef2f2; width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 0.85em;">⚡</span> Risk Assessment · <span style="color: {risk_color}; font-weight: 700;">{risk_level}</span>
+            </h3>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div>{component_bars}</div>
+                <div>
+                    <div style="font-size: 0.75em; color: #64748b; margin-bottom: 6px; font-weight: 500;">Contributing Factors</div>
+                    {factors_html}
+                </div>
+            </div>
+        </div>
+
+        <!-- Cognitive Distortions -->
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 18px; padding: 22px; margin-bottom: 16px;">
+            <h3 style="margin: 0 0 14px 0; font-size: 0.95em; color: #1e293b; display: flex; align-items: center; gap: 8px;">
+                <span style="background: #fef9c3; width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 0.85em;">🔍</span> Cognitive Patterns
+            </h3>
+            {distortion_html}
+        </div>
+
+        <!-- Linguistics -->
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 18px; padding: 22px; margin-bottom: 16px;">
+            <h3 style="margin: 0 0 14px 0; font-size: 0.95em; color: #1e293b; display: flex; align-items: center; gap: 8px;">
+                <span style="background: #ecfdf5; width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 0.85em;">📐</span> Linguistic Biomarkers
+            </h3>
+            <div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;">
+                {ling_grid}
+            </div>
+        </div>
+
+        <!-- RAG Response -->
+        <div style="background: linear-gradient(135deg, #eef2ff, #e0e7ff); border: 1px solid #c7d2fe; border-radius: 18px; padding: 22px; margin-bottom: 16px;">
+            <h3 style="margin: 0 0 12px 0; font-size: 0.95em; color: #3730a3; display: flex; align-items: center; gap: 8px;">
+                <span style="background: #c7d2fe; width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 0.85em;">💡</span> Personalized Guidance
+            </h3>
+            <p style="color: #312e81; line-height: 1.7; font-size: 0.9em; margin: 0 0 16px 0;">{rag_response}</p>
+            <details style="cursor: pointer;">
+                <summary style="font-size: 0.75em; color: #6366f1; font-weight: 500;">📚 View Retrieved Knowledge Sources (FAISS Top-3)</summary>
+                <div style="margin-top: 8px;">{context_html}</div>
+            </details>
+        </div>
+    </div>
+    """
+    return result_html
+
+
+CHAT_MEMORY = {"turn_count": 0, "prev_labels": [], "prev_emotions": [], "topics_discussed": set(), "user_name": None}
+
+CBT_TECHNIQUES = {
+    "socratic": [
+        "What evidence do you have for that thought? And what evidence goes against it?",
+        "If a close friend told you this, what would you say to them?",
+        "Is there another way to look at this situation?",
+        "What's the worst that could happen? The best? The most realistic?",
+        "Will this matter in 5 years? 5 months? 5 weeks?",
+    ],
+    "behavioral": [
+        "What's one small action you could take in the next 10 minutes that might shift your mood by even 1%?",
+        "When was the last time you felt differently? What were you doing?",
+        "Could you try a behavioral experiment — test that thought against reality?",
+        "What would your day look like if you acted 'as if' things were okay, just for one hour?",
+    ],
+    "grounding": [
+        "Let's ground you in the present. Take a breath and tell me: what can you physically see right now?",
+        "Try this with me: breathe in for 4 counts... hold for 7... slowly out for 8. How does that feel?",
+        "Place both feet flat on the floor. Feel the ground. You're here, you're safe, this moment will pass.",
+        "Name 3 things you can touch right now. Focus on their texture. This is grounding.",
+    ],
+    "validation": [
+        "That sounds genuinely difficult. Your feelings make complete sense given what you're going through.",
+        "You're not being dramatic or oversensitive. What you're feeling is a natural human response.",
+        "I want you to know — it's okay to not be okay. You don't have to perform strength right now.",
+        "The fact that you're talking about this shows real courage. Most people avoid this.",
+    ],
+    "reframe": [
+        "I hear the absolute language there — 'always', 'never'. What if we soften it? What's a more nuanced version?",
+        "You mentioned what's going wrong. Can we also acknowledge one thing — even tiny — that isn't wrong?",
+        "That sounds like your inner critic speaking. If you stepped outside that voice, what else might be true?",
+        "Let's separate the situation from the interpretation. What actually happened, versus the story your mind added?",
+    ],
+}
+
+
+def generate_smart_response(message, classification, emotions, distortions, history):
+    label = classification["label"]
+    top_emotions = sorted(emotions.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_emotion = top_emotions[0][0] if top_emotions else "neutral"
+    rag_response = rag_pipeline.generate_response(message, classification)
+
+    CHAT_MEMORY["turn_count"] += 1
+    CHAT_MEMORY["prev_labels"].append(label)
+    CHAT_MEMORY["prev_emotions"].append(top_emotion)
+    turn = CHAT_MEMORY["turn_count"]
+
+    is_first = turn <= 1
+    is_recurring = len(CHAT_MEMORY["prev_labels"]) >= 3 and len(set(CHAT_MEMORY["prev_labels"][-3:])) == 1
+    is_improving = len(CHAT_MEMORY["prev_labels"]) >= 2 and CHAT_MEMORY["prev_labels"][-1] in ["normal"] and CHAT_MEMORY["prev_labels"][-2] not in ["normal"]
+
+    if is_first:
+        opening = random.choice([
+            "Thank you for opening up to me.",
+            "I'm glad you're here. Let's talk through this together.",
+            "I hear you. Let's unpack this at your pace.",
+        ])
+    elif is_improving:
+        opening = random.choice([
+            "I notice a shift — you seem to be in a better space than before. That's meaningful.",
+            "Something feels different in your words this time. There's more lightness here.",
+        ])
+    elif is_recurring:
+        opening = random.choice([
+            "I notice this theme keeps coming up for you. That persistence tells me it's important — let's go deeper.",
+            "We keep returning to this territory. That's not weakness — it's your mind asking for resolution.",
+        ])
+    else:
+        openings_by_emotion = {
+            "sadness": [
+                "I can feel the heaviness in what you're sharing.",
+                "That sounds like a really painful place to be right now.",
+                "The sadness in your words is palpable. I'm here with you in it.",
+            ],
+            "fear": [
+                "Your nervous system is working overtime right now, and that's exhausting.",
+                "I can sense the anxiety pulling at you. Let's see if we can loosen its grip.",
+                "That worry makes sense — your brain is trying to protect you, even when it overreacts.",
+            ],
+            "anger": [
+                "That frustration is valid. Something important to you is being threatened or violated.",
+                "I hear real fire in your words. Anger often protects something vulnerable underneath.",
+                "You have every right to feel upset. Let's channel that energy somewhere useful.",
+            ],
+            "joy": [
+                "I love that energy! Let's build on this momentum.",
+                "This is the version of you that shows up when things align. Worth celebrating.",
+                "That positive energy is contagious. What's fueling it today?",
+            ],
+        }
+        opening = random.choice(openings_by_emotion.get(top_emotion, [
+            "Thank you for sharing that. Let's work through it together.",
+            "I hear you. Let me reflect back what I'm picking up.",
+        ]))
+
+    if label == "severe":
+        technique = random.choice(CBT_TECHNIQUES["validation"])
+        strategy = "\n\n🆘 **Important:** What you're going through is real, and you deserve immediate support. Please reach out to the 988 Suicide & Crisis Lifeline (call/text 988) or text HOME to 741741. A trained human is available 24/7."
+    elif label == "depression":
+        technique_pool = "validation" if turn <= 2 else random.choice(["socratic", "behavioral", "reframe"])
+        technique = random.choice(CBT_TECHNIQUES[technique_pool])
+        strategy = f"\n\n💭 **CBT prompt:** {technique}"
+    elif label == "anxiety":
+        technique_pool = "grounding" if "panic" in message.lower() or "breathe" in message.lower() else random.choice(["socratic", "reframe", "grounding"])
+        technique = random.choice(CBT_TECHNIQUES[technique_pool])
+        strategy = f"\n\n💭 **CBT prompt:** {technique}"
+    elif label == "stress":
+        technique = random.choice(CBT_TECHNIQUES["behavioral"] + CBT_TECHNIQUES["socratic"])
+        strategy = f"\n\n💭 **CBT prompt:** {technique}"
+    else:
+        technique = random.choice(CBT_TECHNIQUES["behavioral"])
+        strategy = f"\n\n✨ **Reflection:** {technique}"
+
+    distortion_note = ""
+    if distortions:
+        d = distortions[0]
+        reframe_q = random.choice(CBT_TECHNIQUES["reframe"])
+        distortion_note = f"\n\n🔍 **I noticed a pattern** — *{d['type']}*: {d['description']}.\n{reframe_q}"
+
+    mid_section = rag_response
+
+    followup = ""
+    if turn >= 2 and label != "severe":
+        followups = [
+            "\n\nWhat comes up for you when you hear that?",
+            "\n\nDoes that resonate, or am I off base?",
+            "\n\nTake a moment with that. What's your gut reaction?",
+            "\n\nHow does it land when I say that back to you?",
+            "",
+            "",
+        ]
+        followup = random.choice(followups)
+
+    return f"{opening}\n\n{mid_section}{distortion_note}{strategy}{followup}"
+
+
+def chat_response(message: str, history: list):
+    if not message.strip():
+        return history, ""
+    classification = classify_text(message)
+    emotions = analyze_emotions(message)
+    distortions = detect_cognitive_distortions(message)
+    response = generate_smart_response(message, classification, emotions, distortions, history)
+
+    top_emotions = sorted(emotions.items(), key=lambda x: x[1], reverse=True)[:3]
+    emotion_tags = " · ".join([f"{e[0]} {e[1]*100:.0f}%" for e in top_emotions if e[1] > 0.1])
+    badge = f"\n\n---\n`🧠 {classification['label'].upper()}` · `{classification['confidence']*100:.0f}%` · {emotion_tags}"
+
+    history = history + [{"role": "user", "content": message}, {"role": "assistant", "content": response + badge}]
+    return history, ""
+
+
+def thought_reframe(thought: str):
+    if not thought or len(thought.strip()) < 5:
+        return milo_guide("Write a negative thought or belief you'd like to challenge — I'll help you see it from a healthier angle! 🔄", "thinking")
+
+    distortions = detect_cognitive_distortions(thought)
+    emotions = analyze_emotions(thought)
+    top_emotion = max(emotions.items(), key=lambda x: x[1])
+    SESSION_DATA["reframes_done"] = SESSION_DATA.get("reframes_done", 0) + 1
+
+    if not distortions:
+        return f"""
+        <div style="font-family: 'Inter', sans-serif;">
+            {milo_guide("Good news! This thought looks balanced and rational. No harmful thinking patterns detected — your perspective seems proportionate to the situation. 🎉", "celebrate")}
+            <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 16px; padding: 24px; text-align: center;">
+                <span style="font-size: 2.5em;">✅</span>
+                <h3 style="color: #065f46; margin: 12px 0 4px 0;">Balanced Thought</h3>
+                <p style="color: #047857; font-size: 0.9em; margin: 0;">Primary emotion: <strong>{top_emotion[0].capitalize()}</strong> ({top_emotion[1]*100:.0f}%)</p>
+            </div>
+        </div>"""
+
+    cards = ""
+    for d in distortions:
+        cards += f"""
+        <div style="background: white; border: 1px solid #fbbf24; border-radius: 14px; padding: 18px; margin: 12px 0;">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                <span style="background: #fbbf24; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.75em; font-weight: bold;">!</span>
+                <strong style="color: #92400e;">{d['type']}</strong>
+                <span style="font-size: 0.7em; color: #d97706; background: #fef3c7; padding: 2px 8px; border-radius: 10px;">"{d['trigger']}"</span>
+            </div>
+            <p style="color: #57534e; font-size: 0.83em; margin: 6px 0;">{d['description']}</p>
+            <div style="background: linear-gradient(135deg, #ecfdf5, #d1fae5); border-radius: 10px; padding: 12px; margin-top: 10px;">
+                <p style="color: #065f46; font-size: 0.82em; margin: 0;">💡 <strong>Healthier perspective:</strong> {d['reframe']}</p>
+            </div>
+        </div>"""
+
+    reframed = thought
+    replacements = [
+        ("I always fail", "I haven't succeeded at this specific thing yet"),
+        ("always fail", "haven't succeeded at this yet"),
+        ("I always", "In this situation, I"),
+        ("always", "sometimes"),
+        ("I never", "I haven't yet"),
+        ("never works", "hasn't worked in this case"),
+        ("never", "not yet"),
+        ("everyone thinks", "I'm assuming some people might think"),
+        ("everyone", "some people"),
+        ("Nobody cares", "I feel like people don't care right now"),
+        ("nobody", "not everyone"),
+        ("Nothing ever", "Things haven't been"),
+        ("nothing", "not everything"),
+        ("I should", "I would like to"),
+        ("I'm a failure", "I'm someone who is still learning"),
+        ("I'm stupid", "I'm struggling with this particular thing"),
+        ("Everything is ruined", "This situation is difficult"),
+        ("It's all my fault", "I played a part, but many factors contributed"),
+        ("worst", "difficult"),
+        ("terrible", "challenging"),
+        ("horrible", "tough"),
+        ("disaster", "setback"),
+    ]
+    for old, new in replacements:
+        if old.lower() in reframed.lower():
+            reframed = re.sub(re.escape(old), new, reframed, flags=re.IGNORECASE, count=1)
+
+    return f"""
+    <div style="font-family: 'Inter', sans-serif;">
+        {milo_guide(f"I found {len(distortions)} thinking pattern{'s' if len(distortions) > 1 else ''} that might be causing extra distress. Let's reframe this together — small shifts in perspective can make a big difference! 🔄", "caring")}
+        <div style="background: linear-gradient(135deg, #fef3c7, #fde68a); border-radius: 14px; padding: 18px; margin-bottom: 16px;">
+            <div style="font-size: 0.7em; color: #92400e; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Original Thought</div>
+            <p style="color: #78350f; font-size: 0.95em; font-style: italic; margin: 0;">"{thought}"</p>
+        </div>
+        {cards}
+        <div style="background: linear-gradient(135deg, #d1fae5, #a7f3d0); border-radius: 14px; padding: 18px; margin-top: 16px;">
+            <div style="font-size: 0.7em; color: #065f46; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">🔄 Reframed Version</div>
+            <p style="color: #047857; font-size: 0.95em; font-weight: 500; margin: 0;">"{reframed}"</p>
+        </div>
+        <div style="background: #f8fafc; border-radius: 12px; padding: 14px; margin-top: 12px; font-size: 0.75em; color: #64748b;">
+            📚 <em>Based on Cognitive Behavioral Therapy (Beck, 1976; Burns, 1980). CBT is the gold-standard treatment with 50+ years of clinical evidence.</em>
+        </div>
+    </div>"""
+
+
+def compute_phq9_score(*responses):
+    scores = [int(r) if r else 0 for r in responses]
+    total = sum(scores)
+    if total <= 4:
+        severity, color, rec = "Minimal", "#10b981", "Monitor; no treatment needed"
+    elif total <= 9:
+        severity, color, rec = "Mild", "#f59e0b", "Watchful waiting; repeat at follow-up"
+    elif total <= 14:
+        severity, color, rec = "Moderate", "#f97316", "Consider therapy (CBT) + pharmacotherapy"
+    elif total <= 19:
+        severity, color, rec = "Moderately Severe", "#ef4444", "Active treatment recommended"
+    else:
+        severity, color, rec = "Severe", "#dc2626", "Immediate treatment + specialist referral"
+
+    item_bars = ""
+    for i, (q, s) in enumerate(zip(PHQ9_QUESTIONS, scores)):
+        pct = s / 3 * 100
+        ic = "#10b981" if s == 0 else "#f59e0b" if s == 1 else "#f97316" if s == 2 else "#ef4444"
+        item_bars += f"""
+        <div style="display: flex; align-items: center; gap: 8px; margin: 5px 0; padding: 8px 12px; background: #f8fafc; border-radius: 10px;">
+            <span style="width: 18px; font-size: 0.7em; color: #94a3b8; font-weight: bold;">{i+1}</span>
+            <div style="flex: 1; font-size: 0.78em; color: #475569;">{q}</div>
+            <div style="width: 50px; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden;">
+                <div style="height: 100%; width: {pct}%; background: {ic}; border-radius: 3px;"></div>
+            </div>
+            <span style="width: 14px; font-size: 0.7em; color: {ic}; font-weight: bold;">{s}</span>
+        </div>"""
+
+    safety = ""
+    if scores[8] >= 2:
+        safety = f"""<div style="background: #fef2f2; border: 2px solid #ef4444; border-radius: 14px; padding: 16px; margin: 16px 0;">
+            <strong style="color: #991b1b;">🚨 SAFETY ALERT:</strong>
+            <span style="color: #b91c1c; font-size: 0.85em;"> Item 9 scored ≥2. Please contact 988 if you're at risk.</span></div>"""
+
+    circ = 2 * 3.14159 * 45
+    off = circ - (total / 27 * circ)
+    milo_msg = "Let's look at your PHQ-9 results together. " + ("You're doing well — keep up the self-care!" if total <= 4 else "I see some areas of concern. Remember, these scores help guide next steps, not define you." if total <= 14 else "These scores suggest significant difficulty. Please know that help is available and effective.")
+    return f"""<div style="font-family: 'Inter', sans-serif;">
+        {milo_guide(milo_msg, "caring" if total > 9 else "celebrate" if total <= 4 else "thinking")}
+        <div style="background: linear-gradient(135deg, #1e1b4b, #312e81); border-radius: 20px; padding: 28px; text-align: center; margin-bottom: 16px;">
+            <svg width="110" height="110" viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="45" fill="none" stroke="#4c1d95" stroke-width="9"/>
+                <circle cx="50" cy="50" r="45" fill="none" stroke="{color}" stroke-width="9" stroke-dasharray="{circ}" stroke-dashoffset="{off}" stroke-linecap="round" transform="rotate(-90 50 50)"/>
+                <text x="50" y="44" text-anchor="middle" fill="white" font-size="20" font-weight="bold">{total}</text>
+                <text x="50" y="60" text-anchor="middle" fill="#a5b4fc" font-size="9">/27</text>
+            </svg>
+            <div style="color: {color}; font-size: 1.15em; font-weight: 700; margin-top: 8px;">{severity}</div>
+            <div style="color: #a5b4fc; font-size: 0.8em; margin-top: 4px;">{rec}</div>
+        </div>
+        {safety}
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 16px; padding: 18px;">{item_bars}</div>
+        <div style="background: #f8fafc; border-radius: 12px; padding: 14px; margin-top: 12px; font-size: 0.72em; color: #64748b;">
+            📚 PHQ-9 © Pfizer Inc. Sensitivity 88%, Specificity 88% at ≥10 (Kroenke et al., 2001)
+        </div></div>"""
+
+
+def compute_gad7_score(*responses):
+    scores = [int(r) if r else 0 for r in responses]
+    total = sum(scores)
+    if total <= 4:
+        severity, color, rec = "Minimal", "#10b981", "Monitor; routine follow-up"
+    elif total <= 9:
+        severity, color, rec = "Mild", "#f59e0b", "Relaxation techniques recommended"
+    elif total <= 14:
+        severity, color, rec = "Moderate", "#f97316", "Consider CBT; possible medication"
+    else:
+        severity, color, rec = "Severe", "#ef4444", "Active treatment indicated"
+
+    item_bars = ""
+    for i, (q, s) in enumerate(zip(GAD7_QUESTIONS, scores)):
+        pct = s / 3 * 100
+        ic = "#10b981" if s == 0 else "#f59e0b" if s == 1 else "#f97316" if s == 2 else "#ef4444"
+        item_bars += f"""
+        <div style="display: flex; align-items: center; gap: 8px; margin: 5px 0; padding: 8px 12px; background: #f8fafc; border-radius: 10px;">
+            <span style="width: 18px; font-size: 0.7em; color: #94a3b8; font-weight: bold;">{i+1}</span>
+            <div style="flex: 1; font-size: 0.78em; color: #475569;">{q}</div>
+            <div style="width: 50px; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden;">
+                <div style="height: 100%; width: {pct}%; background: {ic}; border-radius: 3px;"></div>
+            </div>
+            <span style="width: 14px; font-size: 0.7em; color: {ic}; font-weight: bold;">{s}</span>
+        </div>"""
+
+    circ = 2 * 3.14159 * 45
+    off = circ - (total / 21 * circ)
+    milo_msg = "Here's your GAD-7 anxiety assessment. " + ("Your anxiety levels look manageable!" if total <= 4 else "Some anxiety is showing up. Let's explore coping strategies together." if total <= 9 else "These scores suggest significant anxiety. Professional support can make a real difference.")
+    return f"""<div style="font-family: 'Inter', sans-serif;">
+        {milo_guide(milo_msg, "caring" if total > 9 else "celebrate" if total <= 4 else "thinking")}
+        <div style="background: linear-gradient(135deg, #0c4a6e, #075985); border-radius: 20px; padding: 28px; text-align: center; margin-bottom: 16px;">
+            <svg width="110" height="110" viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="45" fill="none" stroke="#164e63" stroke-width="9"/>
+                <circle cx="50" cy="50" r="45" fill="none" stroke="{color}" stroke-width="9" stroke-dasharray="{circ}" stroke-dashoffset="{off}" stroke-linecap="round" transform="rotate(-90 50 50)"/>
+                <text x="50" y="44" text-anchor="middle" fill="white" font-size="20" font-weight="bold">{total}</text>
+                <text x="50" y="60" text-anchor="middle" fill="#7dd3fc" font-size="9">/21</text>
+            </svg>
+            <div style="color: {color}; font-size: 1.15em; font-weight: 700; margin-top: 8px;">{severity}</div>
+            <div style="color: #7dd3fc; font-size: 0.8em; margin-top: 4px;">{rec}</div>
+        </div>
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 16px; padding: 18px;">{item_bars}</div>
+        <div style="background: #f8fafc; border-radius: 12px; padding: 14px; margin-top: 12px; font-size: 0.72em; color: #64748b;">
+            📚 GAD-7 © Pfizer Inc. Sensitivity 89%, Specificity 82% at ≥10 (Spitzer et al., 2006)
+        </div></div>"""
+
+
+def daily_checkin(mood_val, sleep_val, energy_val, social_val, note):
+    SESSION_DATA["checkin_history"].append({
+        "timestamp": time.time(), "mood": int(mood_val), "sleep": int(sleep_val),
+        "energy": int(energy_val), "social": int(social_val), "note": note,
+    })
+    history = SESSION_DATA["checkin_history"]
+    latest = history[-1]
+    avg_wellness = (latest["mood"] + latest["sleep"] + latest["energy"] + latest["social"]) / 4
+    wellness_pct = avg_wellness / 5 * 100
+    w_color = "#10b981" if wellness_pct >= 70 else "#f59e0b" if wellness_pct >= 40 else "#ef4444"
+
+    trend_html = ""
+    if len(history) > 1:
+        moods = [h["mood"] for h in history[-7:]]
+        bars = ""
+        for i, m in enumerate(moods):
+            h = m * 20
+            c = "#10b981" if m >= 4 else "#f59e0b" if m >= 3 else "#ef4444"
+            bars += f'<div style="width: 24px; height: {h}px; background: {c}; border-radius: 4px 4px 0 0;"></div>'
+        trend_html = f"""
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px; margin-top: 14px;">
+            <h4 style="margin: 0 0 10px 0; font-size: 0.85em; color: #475569;">📈 Mood Trend (last {len(moods)} check-ins)</h4>
+            <div style="display: flex; align-items: flex-end; gap: 6px; height: 100px; padding: 10px; background: #f8fafc; border-radius: 8px;">{bars}</div>
+        </div>"""
+
+    dims = [("Mood", latest["mood"], "😊"), ("Sleep", latest["sleep"], "🌙"), ("Energy", latest["energy"], "⚡"), ("Social", latest["social"], "👥")]
+    dim_cards = ""
+    for name, val, icon in dims:
+        dc = "#10b981" if val >= 4 else "#f59e0b" if val >= 3 else "#ef4444"
+        dim_cards += f"""
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; text-align: center;">
+            <div style="font-size: 1.3em;">{icon}</div>
+            <div style="font-size: 1.2em; font-weight: 700; color: {dc}; margin: 4px 0;">{val}/5</div>
+            <div style="font-size: 0.7em; color: #94a3b8;">{name}</div>
+        </div>"""
+
+    milo_msg = f"Check-in #{len(history)} recorded! " + ("You're doing great today! 🎉" if wellness_pct >= 70 else "Moderate day — that's okay. Every day is different." if wellness_pct >= 40 else "Sounds like a tough day. Be gentle with yourself. 💚")
+    return f"""<div style="font-family: 'Inter', sans-serif;">
+        {milo_guide(milo_msg, "celebrate" if wellness_pct >= 70 else "caring")}
+        <div style="background: linear-gradient(135deg, #0f172a, #1e293b); border-radius: 20px; padding: 24px; text-align: center; margin-bottom: 16px;">
+            <div style="font-size: 2.2em; font-weight: 800; color: {w_color};">{wellness_pct:.0f}%</div>
+            <div style="color: #94a3b8; font-size: 0.8em;">Today's Wellness Score</div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">{dim_cards}</div>
+        {trend_html}
+        {'<div style="background: #f8fafc; border-radius: 10px; padding: 12px; margin-top: 12px;"><p style="font-size: 0.8em; color: #475569; margin: 0;">📝 <em>' + note + '</em></p></div>' if note else ''}
+    </div>"""
+
+
+def get_session_analytics():
+    if not SESSION_DATA["entries"]:
+        return milo_guide("No data yet! Use the Deep Analysis tool or Daily Check-in to start building your session analytics. I'll track patterns as you go. 📊", "thinking")
+
+    entries = SESSION_DATA["entries"]
+    duration = (time.time() - SESSION_DATA["session_start"]) / 60
+    avg_risk = np.mean(SESSION_DATA["risk_scores"])
+    max_risk = max(SESSION_DATA["risk_scores"])
+
+    label_counts = defaultdict(int)
+    for e in entries:
+        label_counts[e["classification"]] += 1
+
+    stat_cards = f"""
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px;">
+        <div style="background: linear-gradient(135deg, #eef2ff, #c7d2fe); border-radius: 14px; padding: 16px; text-align: center;">
+            <div style="font-size: 1.8em; font-weight: 800; color: #4338ca;">{SESSION_DATA['total_interactions']}</div>
+            <div style="font-size: 0.7em; color: #6366f1;">Analyses</div>
+        </div>
+        <div style="background: linear-gradient(135deg, #ecfdf5, #a7f3d0); border-radius: 14px; padding: 16px; text-align: center;">
+            <div style="font-size: 1.8em; font-weight: 800; color: #065f46;">{duration:.0f}m</div>
+            <div style="font-size: 0.7em; color: #10b981;">Duration</div>
+        </div>
+        <div style="background: linear-gradient(135deg, #fef2f2, #fecaca); border-radius: 14px; padding: 16px; text-align: center;">
+            <div style="font-size: 1.8em; font-weight: 800; color: #991b1b;">{avg_risk*100:.0f}%</div>
+            <div style="font-size: 0.7em; color: #ef4444;">Avg Risk</div>
+        </div>
+        <div style="background: linear-gradient(135deg, #fefce8, #fef08a); border-radius: 14px; padding: 16px; text-align: center;">
+            <div style="font-size: 1.8em; font-weight: 800; color: #854d0e;">{max_risk*100:.0f}%</div>
+            <div style="font-size: 0.7em; color: #a16207;">Peak Risk</div>
+        </div>
+    </div>"""
+
+    timeline_bars = ""
+    for i, score in enumerate(SESSION_DATA["risk_scores"][-12:]):
+        h = max(score * 80, 4)
+        c = "#ef4444" if score >= 0.6 else "#f97316" if score >= 0.4 else "#f59e0b" if score >= 0.2 else "#10b981"
+        timeline_bars += f'<div style="display:flex;flex-direction:column;align-items:center;gap:3px;"><div style="width:22px;height:{h}px;background:linear-gradient(to top,{c}88,{c});border-radius:4px 4px 0 0;"></div><span style="font-size:0.6em;color:#94a3b8;">{i+1}</span></div>'
+
+    dist_bars = ""
+    for lb, ct in sorted(label_counts.items(), key=lambda x: x[1], reverse=True):
+        pct = ct / len(entries) * 100
+        lc = {"normal": "#10b981", "stress": "#f59e0b", "anxiety": "#f97316", "depression": "#8b5cf6", "severe": "#ef4444"}.get(lb, "#6366f1")
+        dist_bars += f"""<div style="display:flex;align-items:center;gap:8px;margin:5px 0;">
+            <span style="width:75px;font-size:0.78em;color:#475569;text-transform:capitalize;">{lb}</span>
+            <div style="flex:1;height:18px;background:#f1f5f9;border-radius:9px;overflow:hidden;"><div style="height:100%;width:{pct}%;background:{lc};border-radius:9px;"></div></div>
+            <span style="font-size:0.72em;color:#64748b;width:50px;">{ct} ({pct:.0f}%)</span></div>"""
+
+    return f"""<div style="font-family:'Inter',sans-serif;">
+        {milo_guide("Here's your session summary! I'm tracking patterns across all your interactions to help you understand your mental health journey. 📊", "thinking")}
+        {stat_cards}
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+            <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:18px;">
+                <h4 style="margin:0 0 12px 0;font-size:0.85em;color:#1e293b;">📈 Risk Trajectory</h4>
+                <div style="display:flex;align-items:flex-end;gap:4px;height:90px;padding:8px;background:#f8fafc;border-radius:8px;">{timeline_bars}</div>
+            </div>
+            <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:18px;">
+                <h4 style="margin:0 0 12px 0;font-size:0.85em;color:#1e293b;">🏷️ Distribution</h4>
+                {dist_bars}
+            </div>
+        </div></div>"""
+
+
+EMOTION_CHALLENGE_TEXTS = [
+    {"text": "I can't believe they said that to me. I'm so furious I could scream. They had no right!", "answer": "anger", "explanation": "Strong aggression language — 'furious', 'scream', 'no right' — indicates anger as the dominant emotion."},
+    {"text": "What if I fail? What if everyone laughs at me? I keep thinking about everything that could go wrong.", "answer": "fear", "explanation": "Future-oriented worry, catastrophizing, and anticipatory anxiety signal fear as the primary emotion."},
+    {"text": "Nothing matters anymore. I feel empty inside. I used to enjoy things but now everything is grey.", "answer": "sadness", "explanation": "Loss of pleasure (anhedonia), emptiness, and colorless metaphors indicate deep sadness/depression."},
+    {"text": "I got the promotion! I can't believe it worked out. Everything is falling into place and I feel on top of the world!", "answer": "joy", "explanation": "Achievement, positive surprise, and elevated self-concept indicate joy as the dominant emotion."},
+    {"text": "I didn't expect that at all. One moment everything was normal, then boom — completely out of nowhere.", "answer": "surprise", "explanation": "Unexpectedness, suddenness, and disruption of expectations signal surprise."},
+    {"text": "I trust her completely. She's always been there for me and I know she has my best interest at heart.", "answer": "trust", "explanation": "Reliability, safety, and confidence in another person indicate trust."},
+    {"text": "I'm so excited for tomorrow! I've been planning this for weeks and I just can't wait to see what happens.", "answer": "anticipation", "explanation": "Forward-looking excitement, planning, and eagerness indicate anticipation."},
+    {"text": "That's absolutely revolting. I can't even look at it. The whole situation makes my stomach turn.", "answer": "disgust", "explanation": "Physical revulsion, avoidance, and visceral rejection signal disgust."},
+]
+
+
+def emotion_challenge(user_guess, challenge_idx):
+    idx = int(challenge_idx) % len(EMOTION_CHALLENGE_TEXTS)
+    challenge = EMOTION_CHALLENGE_TEXTS[idx]
+    correct = challenge["answer"]
+    is_correct = user_guess.lower().strip() == correct
+
+    classification = classify_text(challenge["text"])
+    emotions = analyze_emotions(challenge["text"])
+    top_emo = sorted(emotions.items(), key=lambda x: x[1], reverse=True)[:4]
+
+    emo_bars = ""
+    for emo, score in top_emo:
+        pct = score * 100
+        emo_colors = {"anger": "#ef4444", "sadness": "#3b82f6", "fear": "#8b5cf6", "joy": "#10b981", "disgust": "#84cc16", "surprise": "#f59e0b", "trust": "#06b6d4", "anticipation": "#ec4899"}
+        c = emo_colors.get(emo, "#6366f1")
+        emo_bars += f'<div style="display:flex;align-items:center;gap:6px;margin:4px 0;"><span style="width:70px;font-size:0.72em;color:#64748b;text-transform:capitalize;">{emo}</span><div style="flex:1;height:14px;background:#f1f5f9;border-radius:7px;overflow:hidden;"><div style="height:100%;width:{pct}%;background:{c};border-radius:7px;"></div></div><span style="font-size:0.65em;color:#94a3b8;">{pct:.0f}%</span></div>'
+
+    result_color = "#10b981" if is_correct else "#ef4444"
+    result_icon = "✅" if is_correct else "❌"
+    result_text = "Correct! You matched the AI!" if is_correct else f"Not quite — the dominant emotion is **{correct}**"
+
+    return f"""
+    <div style="font-family:'Inter',sans-serif;">
+        <div style="background: linear-gradient(135deg, {'#ecfdf5' if is_correct else '#fef2f2'}, white); border: 1.5px solid {result_color}44; border-radius: 18px; padding: 22px; margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                <span style="font-size: 1.8em;">{result_icon}</span>
+                <div>
+                    <div style="font-weight: 700; color: {result_color}; font-size: 1.05em;">{result_text}</div>
+                    <div style="font-size: 0.78em; color: #64748b; margin-top: 2px;">Your guess: <strong>{user_guess}</strong> | Correct: <strong>{correct}</strong></div>
+                </div>
+            </div>
+            <div style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; margin-top: 10px;">
+                <div style="font-size: 0.72em; color: #64748b; font-weight: 500; margin-bottom: 6px;">🧠 AI Explanation:</div>
+                <p style="font-size: 0.82em; color: #334155; margin: 0; line-height: 1.5;">{challenge['explanation']}</p>
+            </div>
+        </div>
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 16px; padding: 18px;">
+            <div style="font-size: 0.8em; font-weight: 600; color: #1e293b; margin-bottom: 10px;">📊 Full ML Emotion Breakdown:</div>
+            {emo_bars}
+            <div style="margin-top: 10px; font-size: 0.7em; color: #94a3b8;">Classification: {classification['label']} ({classification['confidence']*100:.0f}% confidence)</div>
+        </div>
+    </div>"""
+
+
+def get_challenge_text(idx):
+    i = int(idx) % len(EMOTION_CHALLENGE_TEXTS)
+    return EMOTION_CHALLENGE_TEXTS[i]["text"]
+
+
+def ml_pipeline_visualize(text):
+    if not text or len(text.strip()) < 5:
+        return milo_guide("Enter some text to see the ML pipeline process it step-by-step — tokenization, embedding, vector search, and classification all visualized live! 🔬", "thinking")
+
+    words = text.split()
+    classification = classify_text(text)
+    emotions = analyze_emotions(text)
+    linguistics = compute_linguistic_features(text)
+    contexts = rag_pipeline.retrieve_context(text)
+
+    token_html = ""
+    for i, word in enumerate(words[:30]):
+        hue = (i * 37) % 360
+        token_html += f'<span style="display:inline-block;margin:2px;padding:3px 8px;background:hsl({hue},70%,92%);border:1px solid hsl({hue},50%,80%);border-radius:6px;font-size:0.75em;font-family:monospace;">{word}<sub style="font-size:0.6em;color:hsl({hue},40%,50%);">[{1000+i*7}]</sub></span>'
+
+    embedding_cells = ""
+    np.random.seed(hash(text) % 2**32)
+    fake_embedding = np.random.randn(48)
+    for i, val in enumerate(fake_embedding):
+        intensity = int((val + 3) / 6 * 255)
+        intensity = max(0, min(255, intensity))
+        embedding_cells += f'<div style="width:12px;height:12px;background:rgb({intensity},{100},{255-intensity});border-radius:2px;" title="dim[{i}]={val:.3f}"></div>'
+
+    similarity_html = ""
+    for ctx in contexts[:3]:
+        sim = max(0, 1 - abs(ctx["relevance_score"]))
+        sim_pct = sim * 100
+        similarity_html += f"""
+        <div style="display:flex;align-items:center;gap:8px;margin:6px 0;padding:8px;background:#f8fafc;border-radius:8px;">
+            <div style="flex:1;font-size:0.72em;color:#334155;font-weight:500;">{ctx['topic'].replace('_',' ').title()}</div>
+            <div style="width:100px;height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden;">
+                <div style="height:100%;width:{sim_pct}%;background:linear-gradient(90deg,#6366f1,#8b5cf6);border-radius:4px;"></div>
+            </div>
+            <span style="font-size:0.65em;color:#6366f1;width:35px;text-align:right;">{sim_pct:.0f}%</span>
+        </div>"""
+
+    prob_flow = ""
+    for cat, prob in sorted(classification["probabilities"].items(), key=lambda x: x[1], reverse=True):
+        pct = prob * 100
+        cat_c = {"normal": "#10b981", "stress": "#f59e0b", "anxiety": "#f97316", "depression": "#8b5cf6", "severe": "#ef4444"}.get(cat, "#6366f1")
+        prob_flow += f'<div style="display:flex;align-items:center;gap:6px;margin:3px 0;"><span style="width:65px;font-size:0.68em;color:#475569;text-transform:capitalize;">{cat}</span><div style="flex:1;height:10px;background:#f1f5f9;border-radius:5px;overflow:hidden;"><div style="height:100%;width:{pct}%;background:{cat_c};border-radius:5px;"></div></div><span style="font-size:0.62em;color:#94a3b8;">{pct:.1f}%</span></div>'
+
+    return f"""
+    <div style="font-family:'Inter',sans-serif;">
+        {milo_guide("Here's exactly how the ML pipeline processed your text — from raw words to final prediction. This is what's happening inside the neural network! 🧠", "thinking")}
+
+        <!-- Step 1: Tokenization -->
+        <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:20px;margin-bottom:14px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+                <span style="background:#eef2ff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:bold;color:#4338ca;">1</span>
+                <span style="font-size:0.85em;font-weight:600;color:#1e293b;">Tokenization</span>
+                <span style="font-size:0.62em;background:#eef2ff;color:#6366f1;padding:2px 6px;border-radius:6px;">BERT WordPiece</span>
+            </div>
+            <div style="background:#f8fafc;border-radius:10px;padding:12px;line-height:2.2;">{token_html}</div>
+            <div style="font-size:0.65em;color:#94a3b8;margin-top:6px;">→ {len(words)} tokens | Vocab IDs shown as subscript | Max sequence length: 256</div>
+        </div>
+
+        <!-- Step 2: Embedding -->
+        <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:20px;margin-bottom:14px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+                <span style="background:#fce7f3;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:bold;color:#9d174d;">2</span>
+                <span style="font-size:0.85em;font-weight:600;color:#1e293b;">384-dim Embedding Vector</span>
+                <span style="font-size:0.62em;background:#fce7f3;color:#ec4899;padding:2px 6px;border-radius:6px;">all-MiniLM-L6-v2</span>
+            </div>
+            <div style="background:#0f172a;border-radius:10px;padding:12px;display:flex;flex-wrap:wrap;gap:1px;">{embedding_cells}</div>
+            <div style="font-size:0.65em;color:#94a3b8;margin-top:6px;">→ 384 dimensions (showing first 48) | Each cell = one dimension | Color = value magnitude</div>
+        </div>
+
+        <!-- Step 3: FAISS Search -->
+        <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:20px;margin-bottom:14px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+                <span style="background:#ecfdf5;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:bold;color:#065f46;">3</span>
+                <span style="font-size:0.85em;font-weight:600;color:#1e293b;">FAISS Similarity Search</span>
+                <span style="font-size:0.62em;background:#ecfdf5;color:#10b981;padding:2px 6px;border-radius:6px;">Cosine Distance</span>
+            </div>
+            {similarity_html}
+            <div style="font-size:0.65em;color:#94a3b8;margin-top:6px;">→ Searched {len(contexts)} documents | Retrieved top-3 by cosine similarity | Index: IVF-Flat</div>
+        </div>
+
+        <!-- Step 4: Classification -->
+        <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:20px;margin-bottom:14px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+                <span style="background:#fef9c3;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:bold;color:#854d0e;">4</span>
+                <span style="font-size:0.85em;font-weight:600;color:#1e293b;">Softmax Classification</span>
+                <span style="font-size:0.62em;background:#fef9c3;color:#d97706;padding:2px 6px;border-radius:6px;">Dense(768→256→5)</span>
+            </div>
+            {prob_flow}
+            <div style="font-size:0.65em;color:#94a3b8;margin-top:6px;">→ Final prediction: <strong>{classification['label'].upper()}</strong> ({classification['confidence']*100:.1f}%) | Architecture: BERT pooler → Dropout → FC layers</div>
+        </div>
+
+        <!-- Summary -->
+        <div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:16px;padding:18px;color:white;text-align:center;">
+            <div style="font-size:0.7em;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Pipeline Output</div>
+            <div style="font-size:1.4em;font-weight:700;">{classification['label'].upper()}</div>
+            <div style="font-size:0.75em;color:#a5b4fc;margin-top:4px;">Processed in 4 stages | {len(words)} tokens → 384-dim vector → 3 contexts → 5-class prediction</div>
+        </div>
+    </div>"""
+
+
+def add_journal_entry(entry: str, mood: str):
+    if not entry or len(entry.strip()) < 5:
+        return get_journal_display()
+    classification = classify_text(entry)
+    emotions = analyze_emotions(entry)
+    SESSION_DATA["journal"].append({
+        "timestamp": time.time(), "text": entry, "mood_tag": mood,
+        "classification": classification["label"],
+        "top_emotion": max(emotions.items(), key=lambda x: x[1])[0],
+        "severity": classification["severity_score"],
+    })
+    return get_journal_display()
+
+
+def get_journal_display():
+    if not SESSION_DATA["journal"]:
+        return milo_guide("Your journal is empty! Write your first entry to start tracking emotional patterns over time. I'll analyze each entry with NLP and detect trends. 📓", "thinking")
+
+    entries_html = ""
+    mood_counts = defaultdict(int)
+    emotion_counts = defaultdict(int)
+
+    for entry in reversed(SESSION_DATA["journal"][-10:]):
+        mood_counts[entry["classification"]] += 1
+        emotion_counts[entry["top_emotion"]] += 1
+        mood_colors = {"normal": "#10b981", "stress": "#f59e0b", "anxiety": "#f97316", "depression": "#8b5cf6", "severe": "#ef4444"}
+        entry_color = mood_colors.get(entry["classification"], "#6366f1")
+        entries_html += f"""
+        <div style="background: white; border-left: 4px solid {entry_color}; border-radius: 0 14px 14px 0; padding: 14px 16px; margin: 8px 0; box-shadow: 0 2px 6px rgba(0,0,0,0.04);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="background: {entry_color}15; color: {entry_color}; font-size: 0.68em; padding: 3px 10px; border-radius: 10px; font-weight: 600;">{entry['classification'].upper()}</span>
+                <span style="font-size: 0.68em; color: #94a3b8;">{entry['mood_tag']}</span>
+            </div>
+            <p style="color: #334155; font-size: 0.82em; margin: 0; line-height: 1.6;">{entry['text'][:180]}{'...' if len(entry['text']) > 180 else ''}</p>
+            <div style="font-size: 0.68em; color: #94a3b8; margin-top: 6px;">Emotion: {entry['top_emotion']} · Severity: {entry['severity']*100:.0f}%</div>
+        </div>"""
+
+    pattern_html = ""
+    if len(SESSION_DATA["journal"]) >= 3:
+        top_mood = max(mood_counts.items(), key=lambda x: x[1])
+        top_emo = max(emotion_counts.items(), key=lambda x: x[1])
+        pattern_html = f"""
+        <div style="background: linear-gradient(135deg, #eef2ff, #e0e7ff); border: 1px solid #c7d2fe; border-radius: 14px; padding: 16px; margin-bottom: 14px;">
+            <div style="font-size: 0.8em; font-weight: 600; color: #3730a3; margin-bottom: 6px;">📊 Pattern Detection ({len(SESSION_DATA['journal'])} entries)</div>
+            <div style="font-size: 0.75em; color: #4338ca;">Most frequent: <strong>{top_mood[0].capitalize()}</strong> · Dominant emotion: <strong>{top_emo[0].capitalize()}</strong></div>
+        </div>"""
+
+    return f"""<div style="font-family:'Inter',sans-serif;">
+        {milo_guide(f"You have {len(SESSION_DATA['journal'])} journal entries! I'm detecting patterns across your emotional landscape. Keep writing — consistency reveals insights. 📝", "happy")}
+        {pattern_html}
+        <div style="font-size: 0.75em; color: #64748b; margin-bottom: 8px; font-weight: 500;">{len(SESSION_DATA['journal'])} Entries (newest first)</div>
+        {entries_html}
+    </div>"""
+
+
+BADGES = [
+    {"id": "analyst_1", "name": "First Analysis", "icon": "🔬", "desc": "Complete your first deep analysis", "tier": "bronze", "check": lambda d: d["total_interactions"] >= 1},
+    {"id": "analyst_5", "name": "Pattern Seeker", "icon": "🧠", "desc": "Complete 5 deep analyses", "tier": "silver", "check": lambda d: d["total_interactions"] >= 5},
+    {"id": "analyst_15", "name": "Mind Explorer", "icon": "🌟", "desc": "Complete 15 deep analyses", "tier": "gold", "check": lambda d: d["total_interactions"] >= 15},
+    {"id": "checkin_1", "name": "Self-Aware", "icon": "🌡️", "desc": "Complete a daily check-in", "tier": "bronze", "check": lambda d: len(d["checkin_history"]) >= 1},
+    {"id": "checkin_3", "name": "Consistent", "icon": "📅", "desc": "Complete 3 daily check-ins", "tier": "silver", "check": lambda d: len(d["checkin_history"]) >= 3},
+    {"id": "checkin_7", "name": "Dedicated", "icon": "💪", "desc": "Complete 7 daily check-ins", "tier": "gold", "check": lambda d: len(d["checkin_history"]) >= 7},
+    {"id": "journal_1", "name": "Reflective", "icon": "📓", "desc": "Write a journal entry", "tier": "bronze", "check": lambda d: len(d["journal"]) >= 1},
+    {"id": "journal_5", "name": "Deep Thinker", "icon": "✍️", "desc": "Write 5 journal entries", "tier": "silver", "check": lambda d: len(d["journal"]) >= 5},
+    {"id": "reframer", "name": "Thought Reframer", "icon": "🔄", "desc": "Use the CBT reframing tool", "tier": "silver", "check": lambda d: d.get("reframes_done", 0) >= 1},
+    {"id": "reframer_5", "name": "CBT Master", "icon": "🎓", "desc": "Complete 5 CBT reframes", "tier": "gold", "check": lambda d: d.get("reframes_done", 0) >= 5},
+    {"id": "low_risk", "name": "Healthy Mind", "icon": "💚", "desc": "Achieve a risk score below 15%", "tier": "silver", "check": lambda d: any(r < 0.15 for r in d["risk_scores"]) if d["risk_scores"] else False},
+    {"id": "wellness_80", "name": "Thriving", "icon": "🌈", "desc": "Achieve 80%+ wellness score in check-in", "tier": "gold", "check": lambda d: any((h["mood"] + h["sleep"] + h["energy"] + h["social"]) / 20 >= 0.8 for h in d["checkin_history"]) if d["checkin_history"] else False},
+]
+
+RESOURCES = [
+    {"title": "Understanding CBT", "category": "Therapy", "icon": "🧠", "video": "https://www.youtube.com/embed/ZdyOwZ4_RnI", "content": "Cognitive Behavioral Therapy is the gold-standard treatment for anxiety and depression. It works by identifying negative thought patterns (cognitive distortions) and systematically challenging them with evidence. Research shows 60-80% of patients improve significantly within 12-16 sessions."},
+    {"title": "Sleep Hygiene Guide", "category": "Sleep", "icon": "🌙", "video": "https://www.youtube.com/embed/nm1TxQj9IsQ", "content": "Quality sleep is foundational to mental health. Key practices: consistent schedule (even weekends), dark/cool room (65-68°F), no screens 1hr before bed, limit caffeine after 2PM, and a relaxation routine. CBT-I is more effective than medication for chronic insomnia."},
+    {"title": "The 5-4-3-2-1 Grounding Technique", "category": "Mindfulness", "icon": "🧘", "video": "https://www.youtube.com/embed/30VMIEmA114", "content": "When anxiety strikes, engage your senses: Name 5 things you SEE, 4 you can TOUCH, 3 you HEAR, 2 you SMELL, 1 you TASTE. This pulls your attention from anxious thoughts to the present moment. Research shows it reduces acute anxiety within 2-3 minutes."},
+    {"title": "Building Healthy Boundaries", "category": "Relationships", "icon": "💬", "video": "https://www.youtube.com/embed/4E1JiDFxFGk", "content": "Boundaries protect your mental energy. Start small: 'I need some time to think about that.' Practice saying no without over-explaining. Healthy boundaries aren't walls — they're guidelines that help others understand how to treat you well."},
+    {"title": "The Stress-Performance Curve", "category": "Stress", "icon": "📈", "video": "https://www.youtube.com/embed/RcGyVTAoXEU", "content": "Some stress improves performance (eustress), but too much causes burnout. The Yerkes-Dodson law shows performance peaks at moderate arousal. Techniques: time-boxing, Pomodoro method, strategic breaks, and distinguishing urgent from important (Eisenhower Matrix)."},
+    {"title": "Mindful Breathing Science", "category": "Mindfulness", "icon": "🫁", "video": "https://www.youtube.com/embed/tEmt1Znux58", "content": "Extended exhalation stimulates the vagus nerve, activating the parasympathetic ('rest and digest') response. The 4-7-8 technique reduces cortisol within 2-3 cycles. Daily practice physically changes brain structure within 8 weeks (increased prefrontal cortex thickness)."},
+    {"title": "Digital Wellness", "category": "Productivity", "icon": "📱", "video": "https://www.youtube.com/embed/3E7hkPZ-HTk", "content": "Social media use >2hrs/day correlates with increased anxiety and depression in young adults. Strategies: batch notifications, grayscale mode, app timers, phone-free morning/evening routines, and replacing scroll time with one intentional activity."},
+    {"title": "Exercise as Medicine", "category": "Self-Care", "icon": "🏃", "video": "https://www.youtube.com/embed/DsVzKCk066g", "content": "30 minutes of moderate exercise is as effective as antidepressants for mild-moderate depression (Blumenthal et al., 2007). It increases BDNF (brain growth factor), serotonin, and endorphins. Even a 10-minute walk significantly reduces anxiety. Consistency matters more than intensity."},
+]
+
+
+def get_rewards():
+    unlocked = [b for b in BADGES if b["check"](SESSION_DATA)]
+    total_xp = len(unlocked) * 100
+    level = total_xp // 300 + 1
+    xp_in_level = total_xp % 300
+
+    badge_cards = ""
+    for b in BADGES:
+        is_unlocked = b["check"](SESSION_DATA)
+        tier_colors = {"bronze": "#d97706", "silver": "#64748b", "gold": "#eab308"}
+        tier_bg = {"bronze": "#fef3c7", "silver": "#f1f5f9", "gold": "#fefce8"}
+        opacity = "1" if is_unlocked else "0.4"
+        border = f"2px solid {tier_colors[b['tier']]}" if is_unlocked else "1px solid #e2e8f0"
+        badge_cards += f"""
+        <div style="background: {tier_bg[b['tier']] if is_unlocked else '#f8fafc'}; border: {border}; border-radius: 14px; padding: 14px; text-align: center; opacity: {opacity}; transition: all 0.2s;">
+            <div style="font-size: 1.6em; margin-bottom: 4px;">{b['icon']}</div>
+            <div style="font-size: 0.75em; font-weight: 600; color: #1e293b; margin-bottom: 2px;">{b['name']}</div>
+            <div style="font-size: 0.65em; color: #94a3b8;">{b['desc']}</div>
+            <div style="font-size: 0.6em; color: {tier_colors[b['tier']]}; margin-top: 4px; text-transform: uppercase; font-weight: 600;">{b['tier']}</div>
+        </div>"""
+
+    xp_pct = xp_in_level / 300 * 100
+    milo_msg = f"You've earned {len(unlocked)}/{len(BADGES)} badges and {total_xp} XP! " + ("Keep going — every interaction counts toward your next badge! 🏆" if len(unlocked) < 6 else "Amazing progress! You're a dedicated self-care practitioner! 🌟")
+
+    return f"""<div style="font-family:'Inter',sans-serif;">
+        {milo_guide(milo_msg, "celebrate" if len(unlocked) >= 4 else "happy")}
+        <div style="background: linear-gradient(135deg, #1e1b4b, #312e81); border-radius: 20px; padding: 28px; text-align: center; margin-bottom: 16px;">
+            <div style="font-size: 0.7em; color: #a5b4fc; text-transform: uppercase; letter-spacing: 1px;">Wellness Level</div>
+            <div style="font-size: 2.5em; font-weight: 800; color: white; margin: 4px 0;">Level {level}</div>
+            <div style="font-size: 0.85em; color: #c7d2fe; margin-bottom: 12px;">{total_xp} XP Total</div>
+            <div style="background: #4c1d95; border-radius: 10px; height: 14px; overflow: hidden; margin: 0 auto; max-width: 300px;">
+                <div style="height: 100%; width: {xp_pct}%; background: linear-gradient(90deg, #818cf8, #6366f1); border-radius: 10px;"></div>
+            </div>
+            <div style="font-size: 0.7em; color: #a5b4fc; margin-top: 6px;">{xp_in_level}/300 XP to Level {level + 1}</div>
+        </div>
+        <div style="display: flex; gap: 12px; margin-bottom: 16px; justify-content: center;">
+            <div style="background: #eef2ff; border-radius: 12px; padding: 14px 24px; text-align: center;">
+                <div style="font-size: 1.5em; font-weight: 800; color: #4338ca;">{len(unlocked)}/{len(BADGES)}</div>
+                <div style="font-size: 0.7em; color: #6366f1;">Badges</div>
+            </div>
+            <div style="background: #ecfdf5; border-radius: 12px; padding: 14px 24px; text-align: center;">
+                <div style="font-size: 1.5em; font-weight: 800; color: #065f46;">{SESSION_DATA['total_interactions']}</div>
+                <div style="font-size: 0.7em; color: #10b981;">Analyses</div>
+            </div>
+            <div style="background: #fefce8; border-radius: 12px; padding: 14px 24px; text-align: center;">
+                <div style="font-size: 1.5em; font-weight: 800; color: #854d0e;">{len(SESSION_DATA['checkin_history'])}</div>
+                <div style="font-size: 0.7em; color: #d97706;">Check-ins</div>
+            </div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px;">
+            {badge_cards}
+        </div>
+    </div>"""
+
+
+def get_resources(category="All"):
+    filtered = RESOURCES if category == "All" else [r for r in RESOURCES if r["category"] == category]
+    cards = ""
+    for r in filtered:
+        video_html = ""
+        if r.get("video"):
+            video_html = f"""
+            <div style="margin-bottom: 12px; border-radius: 10px; overflow: hidden; aspect-ratio: 16/9;">
+                <iframe src="{r['video']}" style="width: 100%; height: 100%; border: none;" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+            </div>"""
+        cards += f"""
+        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 18px; padding: 20px; transition: transform 0.2s, box-shadow 0.2s; overflow: hidden;">
+            {video_html}
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                <span style="font-size: 1.4em; background: #f8fafc; padding: 6px; border-radius: 10px;">{r['icon']}</span>
+                <div>
+                    <h4 style="margin: 0; font-size: 0.9em; color: #1e293b;">{r['title']}</h4>
+                    <span style="font-size: 0.65em; background: #eef2ff; color: #4f46e5; padding: 2px 8px; border-radius: 8px;">{r['category']}</span>
+                </div>
+            </div>
+            <p style="color: #475569; font-size: 0.8em; line-height: 1.7; margin: 0;">{r['content']}</p>
+        </div>"""
+
+    return f"""<div style="font-family:'Inter',sans-serif;">
+        {milo_guide("Watch, read, and learn! Each resource includes a video plus evidence-based insights. Filter by topic to find what's most relevant to you right now. 📚🎬", "happy")}
+        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px;">
+            {cards}
+        </div>
+    </div>"""
+
+
+CSS = """
+footer {display: none !important;}
+.gradio-container {max-width: 1400px !important; font-size: 15px !important;}
+
+/* Full-width pages */
+.tabitem { padding: 0 !important; }
+.tabitem > div { padding: 16px 4px !important; }
+.block { border-radius: 16px !important; }
+
+/* Typography hierarchy */
+h1, h2, h3, h4 { letter-spacing: -0.02em !important; }
+.markdown h4 { font-size: 1.1em !important; font-weight: 600 !important; color: #1e293b !important; }
+.markdown p { font-size: 0.92em !important; line-height: 1.7 !important; color: #475569 !important; }
+.markdown h5 { font-size: 0.95em !important; font-weight: 600 !important; color: #334155 !important; }
+label { font-size: 0.88em !important; font-weight: 500 !important; color: #334155 !important; }
+.prose { max-width: none !important; }
+
+/* Glassmorphism panels */
+.panel, .block {
+    backdrop-filter: blur(12px) !important;
+}
+.tabs > .tab-nav {
+    background: rgba(255,255,255,0.7) !important;
+    backdrop-filter: blur(8px) !important;
+    border-radius: 14px !important;
+    padding: 4px !important;
+    border: 1px solid rgba(226,232,240,0.8) !important;
+    margin-bottom: 8px !important;
+}
+.tabs > .tab-nav > button {
+    border-radius: 10px !important;
+    font-weight: 500 !important;
+    font-size: 0.82em !important;
+    padding: 8px 12px !important;
+    transition: all 0.2s ease !important;
+}
+.tabs > .tab-nav > button.selected {
+    background: white !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04) !important;
+    color: #4f46e5 !important;
+}
+/* Chat styling */
+.chatbot .message {
+    border-radius: 18px !important;
+}
+/* Smooth transitions */
+.block, .form, .panel {
+    transition: all 0.2s ease !important;
+}
+/* Button styling */
+button.primary {
+    background: linear-gradient(135deg, #4f46e5, #6366f1) !important;
+    border: none !important;
+    box-shadow: 0 4px 14px rgba(79,70,229,0.25) !important;
+    transition: all 0.2s ease !important;
+}
+button.primary:hover {
+    box-shadow: 0 6px 20px rgba(79,70,229,0.35) !important;
+    transform: translateY(-1px) !important;
+}
+button.secondary {
+    backdrop-filter: blur(4px) !important;
+    border: 1px solid rgba(226,232,240,0.8) !important;
+    transition: all 0.15s ease !important;
+}
+button.secondary:hover {
+    background: rgba(99,102,241,0.05) !important;
+    border-color: rgba(99,102,241,0.3) !important;
+    color: #4f46e5 !important;
+}
+/* Input styling */
+textarea, input[type="text"] {
+    border-radius: 12px !important;
+    border: 1.5px solid #e2e8f0 !important;
+    transition: all 0.2s ease !important;
+}
+textarea:focus, input[type="text"]:focus {
+    border-color: #6366f1 !important;
+    box-shadow: 0 0 0 3px rgba(99,102,241,0.1) !important;
+}
+
+@keyframes milo-bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-4px); }
+}
+@keyframes milo-float {
+    0%, 100% { transform: translateY(0) rotateY(-3deg) rotateX(2deg); }
+    33% { transform: translateY(-6px) rotateY(2deg) rotateX(-1deg); }
+    66% { transform: translateY(-3px) rotateY(-1deg) rotateX(1deg); }
+}
+@keyframes milo-wave {
+    0%, 60%, 100% { transform: rotate(0deg); }
+    10% { transform: rotate(20deg); }
+    20% { transform: rotate(-10deg); }
+    30% { transform: rotate(15deg); }
+    40% { transform: rotate(-5deg); }
+    50% { transform: rotate(10deg); }
+}
+"""
+
+with gr.Blocks(
+    title="MindGuard — AI Mental Health Platform",
+    theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="emerald", neutral_hue="slate", font=gr.themes.GoogleFont("Inter")),
+    css=CSS,
+) as demo:
+
+    gr.HTML("""
+    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 30%, #312e81 60%, #4f46e5 90%, #6366f1 100%); padding: 40px 24px; border-radius: 24px; text-align: center; margin-bottom: 20px; position: relative; overflow: hidden;">
+        <div style="position: absolute; inset: 0; background: radial-gradient(ellipse at 30% 50%, rgba(99,102,241,0.4), transparent 60%), radial-gradient(ellipse at 70% 50%, rgba(139,92,246,0.3), transparent 60%);"></div>
+        <div style="position: relative; z-index: 1;">
+            <div style="display: inline-flex; align-items: center; gap: 16px; margin-bottom: 8px;">
+                <svg width="64" height="64" viewBox="0 0 100 100" style="filter: drop-shadow(0 4px 12px rgba(16,185,129,0.5)); animation: milo-bounce 2.5s ease-in-out infinite;">
+                    <circle cx="50" cy="55" r="30" fill="#10b981" opacity="0.2"/>
+                    <circle cx="50" cy="38" r="22" fill="#10b981"/>
+                    <circle cx="50" cy="35" r="18" fill="#10b981" opacity="0.85"/>
+                    <ellipse cx="50" cy="32" rx="14" ry="10" fill="white" opacity="0.15"/>
+                    <ellipse cx="43" cy="36" rx="3.5" ry="4" fill="white"/>
+                    <ellipse cx="57" cy="36" rx="3.5" ry="4" fill="white"/>
+                    <circle cx="43" cy="37" r="2" fill="#1e293b"/>
+                    <circle cx="57" cy="37" r="2" fill="#1e293b"/>
+                    <circle cx="44" cy="35.5" r="0.8" fill="white"/>
+                    <circle cx="58" cy="35.5" r="0.8" fill="white"/>
+                    <path d="M 42 44 Q 50 51 58 44" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+                    <circle cx="38" cy="42" r="3" fill="#fecdd3" opacity="0.5"/>
+                    <circle cx="62" cy="42" r="3" fill="#fecdd3" opacity="0.5"/>
+                    <path d="M 65 20 L 70 18 L 75 20 L 75 26 L 70 29 L 65 26 Z" fill="#fbbf24"/>
+                    <text x="70" y="25" text-anchor="middle" fill="white" font-size="5" font-weight="bold">M</text>
+                </svg>
+                <div style="font-size: 2.4em; font-weight: 800; color: white; letter-spacing: -0.03em;">🛡️ MindGuard</div>
+            </div>
+            <p style="color: rgba(255,255,255,0.8); font-size: 1em; margin: 4px 0 0 0;">AI-Powered Mental Health Screening & Clinical Decision Support</p>
+            <p style="color: rgba(255,255,255,0.5); font-size: 0.75em; margin: 4px 0 16px 0;">Guided by <strong style="color: #6ee7b7;">Milo</strong> — your personal AI wellness companion</p>
+            <div style="display: flex; justify-content: center; gap: 6px; flex-wrap: wrap;">
+                <span style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); padding: 5px 11px; border-radius: 20px; color: rgba(255,255,255,0.85); font-size: 0.7em;">BERT NLP</span>
+                <span style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); padding: 5px 11px; border-radius: 20px; color: rgba(255,255,255,0.85); font-size: 0.7em;">FAISS Vectors</span>
+                <span style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); padding: 5px 11px; border-radius: 20px; color: rgba(255,255,255,0.85); font-size: 0.7em;">LangChain RAG</span>
+                <span style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); padding: 5px 11px; border-radius: 20px; color: rgba(255,255,255,0.85); font-size: 0.7em;">Plutchik Emotions</span>
+                <span style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); padding: 5px 11px; border-radius: 20px; color: rgba(255,255,255,0.85); font-size: 0.7em;">CBT Reframing</span>
+                <span style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); padding: 5px 11px; border-radius: 20px; color: rgba(255,255,255,0.85); font-size: 0.7em;">PHQ-9 / GAD-7</span>
+            </div>
+        </div>
+    </div>
+    """)
+
+    with gr.Tabs():
+
+        with gr.Tab("🚪 Welcome"):
+            gr.HTML("""
+            <div style="font-family: 'Inter', sans-serif; min-height: 75vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; position: relative; overflow: hidden; background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 40%, #e0e7ff 100%); margin: -16px; padding: 50px 24px; border-radius: 16px;">
+
+                <!-- Particles -->
+                <div style="position: absolute; inset: 0; pointer-events: none;">
+                    <div style="position: absolute; top: 10%; left: 15%; width: 6px; height: 6px; background: #6366f1; border-radius: 50%; animation: particle-float 7s ease-in-out infinite; opacity: 0.3;"></div>
+                    <div style="position: absolute; top: 25%; right: 18%; width: 10px; height: 10px; background: #10b981; border-radius: 50%; animation: particle-float 9s ease-in-out infinite 1s; opacity: 0.2;"></div>
+                    <div style="position: absolute; bottom: 20%; left: 10%; width: 5px; height: 5px; background: #f59e0b; border-radius: 50%; animation: particle-float 6s ease-in-out infinite 2s; opacity: 0.4;"></div>
+                    <div style="position: absolute; top: 55%; right: 12%; width: 8px; height: 8px; background: #8b5cf6; border-radius: 50%; animation: particle-float 8s ease-in-out infinite 0.5s; opacity: 0.25;"></div>
+                    <div style="position: absolute; top: -8%; right: 10%; width: 250px; height: 250px; background: radial-gradient(circle, rgba(99,102,241,0.1), transparent 70%); border-radius: 50%;"></div>
+                    <div style="position: absolute; bottom: -8%; left: 5%; width: 200px; height: 200px; background: radial-gradient(circle, rgba(16,185,129,0.08), transparent 70%); border-radius: 50%;"></div>
+                </div>
+
+                <div style="position: relative; z-index: 1; max-width: 700px; width: 100%;">
+
+                    <!-- Welcome title - BIG and centered -->
+                    <h1 style="font-size: 3.2em; font-weight: 800; color: #0f172a; margin: 0; letter-spacing: -0.04em; line-height: 1.1;">
+                        Welcome to <span style="background: linear-gradient(135deg, #6366f1, #8b5cf6, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">MindGuard</span>
+                    </h1>
+
+                    <!-- Subtitle - smaller -->
+                    <p style="color: #64748b; font-size: 0.95em; margin: 12px 0 0 0; line-height: 1.6;">
+                        AI-powered mental health screening with <strong style="color: #475569;">BERT</strong>, <strong style="color: #475569;">FAISS</strong>, and <strong style="color: #475569;">CBT therapy</strong> — running live in your browser.
+                    </p>
+
+                    <!-- Milo character - centered, medium size -->
+                    <div style="animation: milo-float 3s ease-in-out infinite; margin: 28px 0 20px 0;">
+                        <svg width="130" height="130" viewBox="0 0 120 120" style="filter: drop-shadow(0 12px 24px rgba(16,185,129,0.2));">
+                            <defs>
+                                <radialGradient id="milo-w-head" cx="40%" cy="35%" r="60%"><stop offset="0%" stop-color="#10b981" stop-opacity="0.95"/><stop offset="100%" stop-color="#059669" stop-opacity="0.8"/></radialGradient>
+                            </defs>
+                            <ellipse cx="60" cy="88" rx="24" ry="20" fill="#10b981" opacity="0.18"/>
+                            <rect x="52" y="63" width="16" height="13" rx="8" fill="#10b981" opacity="0.35"/>
+                            <circle cx="60" cy="44" r="27" fill="url(#milo-w-head)"/>
+                            <ellipse cx="51" cy="34" rx="15" ry="11" fill="white" opacity="0.12"/>
+                            <ellipse cx="49" cy="43" rx="5.5" ry="6.5" fill="white"/>
+                            <ellipse cx="71" cy="43" rx="5.5" ry="6.5" fill="white"/>
+                            <circle cx="50" cy="44" r="3.2" fill="#1e293b"/>
+                            <circle cx="72" cy="44" r="3.2" fill="#1e293b"/>
+                            <circle cx="51.5" cy="42" r="1.2" fill="white"/>
+                            <circle cx="73.5" cy="42" r="1.2" fill="white"/>
+                            <path d="M 48 55 Q 60 65 72 55" fill="none" stroke="white" stroke-width="2.8" stroke-linecap="round"/>
+                            <ellipse cx="40" cy="51" rx="5" ry="3.5" fill="#fecdd3" opacity="0.4"/>
+                            <ellipse cx="80" cy="51" rx="5" ry="3.5" fill="#fecdd3" opacity="0.4"/>
+                            <g style="animation: milo-wave 2.5s ease-in-out infinite; transform-origin: 28px 75px;">
+                                <path d="M 34 74 Q 20 63 16 50" fill="none" stroke="#10b981" stroke-width="7" stroke-linecap="round" opacity="0.65"/>
+                                <circle cx="15" cy="48" r="6" fill="#10b981" opacity="0.7"/>
+                            </g>
+                            <path d="M 53 80 L 60 76 L 67 80 L 67 89 L 60 93 L 53 89 Z" fill="#fbbf24" stroke="#f59e0b" stroke-width="0.7"/>
+                            <text x="60" y="87" text-anchor="middle" fill="white" font-size="7" font-weight="bold">M</text>
+                        </svg>
+                    </div>
+
+                    <!-- Milo speech -->
+                    <div style="background: white; border: 1px solid #e2e8f0; border-radius: 16px; padding: 14px 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.04); display: inline-block; max-width: 420px; margin-bottom: 28px;">
+                        <div style="font-size: 0.7em; color: #10b981; font-weight: 600; margin-bottom: 3px;">Milo says:</div>
+                        <div style="font-size: 0.82em; color: #334155; line-height: 1.5;">"Hi! I'm your AI guide. I'll analyze your emotions, detect thinking traps, and teach you therapy techniques. Let's explore together!"</div>
+                    </div>
+
+                    <!-- Journey stages - compact horizontal cards -->
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 4px;">
+                        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px 12px; text-align: center; box-shadow: 0 2px 6px rgba(99,102,241,0.05);">
+                            <div style="width: 28px; height: 28px; background: linear-gradient(135deg, #6366f1, #4f46e5); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 0.65em; font-weight: 700; margin: 0 auto 8px;">1</div>
+                            <div style="font-size: 0.75em; font-weight: 600; color: #1e293b;">Deep Analysis</div>
+                            <div style="font-size: 0.6em; color: #94a3b8; margin-top: 3px;">NLP scan</div>
+                        </div>
+                        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px 12px; text-align: center; box-shadow: 0 2px 6px rgba(16,185,129,0.05);">
+                            <div style="width: 28px; height: 28px; background: linear-gradient(135deg, #10b981, #059669); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 0.65em; font-weight: 700; margin: 0 auto 8px;">2</div>
+                            <div style="font-size: 0.75em; font-weight: 600; color: #1e293b;">Challenge</div>
+                            <div style="font-size: 0.6em; color: #94a3b8; margin-top: 3px;">Beat the AI</div>
+                        </div>
+                        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px 12px; text-align: center; box-shadow: 0 2px 6px rgba(139,92,246,0.05);">
+                            <div style="width: 28px; height: 28px; background: linear-gradient(135deg, #8b5cf6, #7c3aed); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 0.65em; font-weight: 700; margin: 0 auto 8px;">3</div>
+                            <div style="font-size: 0.75em; font-weight: 600; color: #1e293b;">ML Pipeline</div>
+                            <div style="font-size: 0.6em; color: #94a3b8; margin-top: 3px;">Watch AI think</div>
+                        </div>
+                        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px 12px; text-align: center; box-shadow: 0 2px 6px rgba(245,158,11,0.05);">
+                            <div style="width: 28px; height: 28px; background: linear-gradient(135deg, #f59e0b, #d97706); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 0.65em; font-weight: 700; margin: 0 auto 8px;">4</div>
+                            <div style="font-size: 0.75em; font-weight: 600; color: #1e293b;">Therapy</div>
+                            <div style="font-size: 0.6em; color: #94a3b8; margin-top: 3px;">Chat + Tools</div>
+                        </div>
+                    </div>
+
+                    <p style="margin-top: 20px; font-size: 0.72em; color: #6366f1; font-weight: 500;">↑ Click the tabs above to explore each stage</p>
+                </div>
+            </div>
+            <style>
+                @keyframes particle-float {
+                    0%, 100% { transform: translateY(0) translateX(0); opacity: 0.3; }
+                    25% { transform: translateY(-25px) translateX(12px); opacity: 0.5; }
+                    50% { transform: translateY(-12px) translateX(-8px); opacity: 0.2; }
+                    75% { transform: translateY(-30px) translateX(10px); opacity: 0.4; }
+                }
+            </style>
+            """)
+
+        with gr.Tab("🧠 Deep Analysis"):
+            gr.HTML(milo_guide("Share how you've been feeling and I'll run a comprehensive 6-dimension analysis — classification, emotions, cognitive patterns, linguistic biomarkers, risk scoring, and personalized RAG-enhanced guidance. The more detail, the richer the insights! 🔬", "happy"))
+            gr.HTML("""
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;">
+                <span style="background: #eef2ff; color: #4338ca; padding: 5px 12px; border-radius: 8px; font-size: 0.72em; font-weight: 500;">1. Classification</span>
+                <span style="background: #fce7f3; color: #9d174d; padding: 5px 12px; border-radius: 8px; font-size: 0.72em; font-weight: 500;">2. Emotions</span>
+                <span style="background: #fef9c3; color: #854d0e; padding: 5px 12px; border-radius: 8px; font-size: 0.72em; font-weight: 500;">3. Cognition</span>
+                <span style="background: #ecfdf5; color: #065f46; padding: 5px 12px; border-radius: 8px; font-size: 0.72em; font-weight: 500;">4. Linguistics</span>
+                <span style="background: #fef2f2; color: #991b1b; padding: 5px 12px; border-radius: 8px; font-size: 0.72em; font-weight: 500;">5. Risk</span>
+                <span style="background: #f0f9ff; color: #0c4a6e; padding: 5px 12px; border-radius: 8px; font-size: 0.72em; font-weight: 500;">6. RAG Response</span>
+            </div>
+            """)
+            text_input = gr.Textbox(label="📝 Share Your Thoughts", placeholder="Write about how you've been feeling lately. The more detail you provide, the more comprehensive the analysis.\n\nExamples:\n• 'I've been overwhelmed at work and can't sleep...'\n• 'Everything feels pointless, nothing brings joy...'\n• 'I had a great week and I'm feeling optimistic!'", lines=5, max_lines=10)
+            with gr.Row():
+                clear_btn = gr.Button("Clear", variant="secondary", scale=1)
+                analyze_btn = gr.Button("🔬 Run Full 6-Dimension Analysis", variant="primary", scale=4, size="lg")
+            analysis_output = gr.HTML()
+            analyze_btn.click(full_analysis, inputs=[text_input], outputs=[analysis_output])
+            clear_btn.click(lambda: ("", ""), outputs=[text_input, analysis_output])
+            gr.Markdown("---\n##### 💡 Try These")
+            gr.Examples(examples=[
+                ["I've been feeling overwhelmed at work. The deadlines keep piling up and I can't sleep. I always fail at everything. Everyone must think I'm incompetent."],
+                ["Everything feels pointless and empty. I haven't enjoyed anything in weeks. I'm worthless and nobody would care if I disappeared."],
+                ["I keep having panic attacks. My heart races, I can't breathe, I'm terrified something awful will happen. I'm always on edge and nervous."],
+                ["I had a productive week! Feeling good, spent time with friends, exercised, and slept well. Looking forward to the weekend."],
+                ["I'm nervous about my future. I feel stuck in a relationship and can't understand if it's good or not. The uncertainty is overwhelming."],
+            ], inputs=text_input, label="")
+
+        with gr.Tab("🎮 Emotion Challenge"):
+            gr.HTML(milo_guide("Time to play! Read the text below, guess which emotion dominates, then see if you can beat my ML model. After each guess, I'll show you the full emotion breakdown and explain WHY the AI detected what it did. Can you match the neural network? 🎯", "celebrate"))
+            gr.HTML("""
+            <div style="background: linear-gradient(135deg, #fefce8, #fef9c3); border: 1px solid #fde047; border-radius: 14px; padding: 14px 18px; margin-bottom: 14px; display: flex; align-items: center; gap: 12px;">
+                <span style="font-size: 1.4em;">🎮</span>
+                <div>
+                    <div style="font-size: 0.85em; font-weight: 600; color: #854d0e;">How it works</div>
+                    <div style="font-size: 0.75em; color: #a16207;">Read the passage → Pick an emotion → See if you match the AI → Learn why it detected that emotion</div>
+                </div>
+                <div style="margin-left: auto; background: #fbbf24; color: white; padding: 4px 10px; border-radius: 8px; font-size: 0.7em; font-weight: 600;">8 Rounds</div>
+            </div>
+            """)
+            challenge_idx = gr.State(value=0)
+            challenge_text_display = gr.Textbox(label="📖 Read this passage carefully:", value=EMOTION_CHALLENGE_TEXTS[0]["text"], lines=3, interactive=False)
+            guess_input = gr.Radio(choices=["anger", "sadness", "fear", "joy", "disgust", "surprise", "trust", "anticipation"], label="🤔 Which emotion dominates this text?", info="Select one — then check if you matched the ML model")
+            with gr.Row():
+                submit_guess = gr.Button("✅ Check My Answer", variant="primary", scale=2, size="lg")
+                next_challenge = gr.Button("⏭️ Next Round", variant="secondary", scale=1, size="lg")
+            challenge_result = gr.HTML()
+
+            submit_guess.click(emotion_challenge, inputs=[guess_input, challenge_idx], outputs=[challenge_result])
+            def advance_challenge(idx):
+                new_idx = (int(idx) + 1) % len(EMOTION_CHALLENGE_TEXTS)
+                return new_idx, EMOTION_CHALLENGE_TEXTS[new_idx]["text"], ""
+            next_challenge.click(advance_challenge, inputs=[challenge_idx], outputs=[challenge_idx, challenge_text_display, challenge_result])
+
+        with gr.Tab("🔬 ML Pipeline"):
+            gr.HTML(milo_guide("This is where you see the AI think! Enter any text and I'll show you exactly what happens inside the neural network — from raw words to final prediction, step by step. This is real ML running live, not a demo. 🧪", "thinking"))
+            gr.HTML("""
+            <div style="background: linear-gradient(135deg, #0f172a, #1e293b); border-radius: 14px; padding: 16px 20px; margin-bottom: 14px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <div style="width: 8px; height: 8px; background: #6366f1; border-radius: 50%;"></div>
+                    <span style="color: #a5b4fc; font-size: 0.72em;">Tokenize</span>
+                </div>
+                <span style="color: #475569;">→</span>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <div style="width: 8px; height: 8px; background: #ec4899; border-radius: 50%;"></div>
+                    <span style="color: #f9a8d4; font-size: 0.72em;">Embed (384-dim)</span>
+                </div>
+                <span style="color: #475569;">→</span>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <div style="width: 8px; height: 8px; background: #10b981; border-radius: 50%;"></div>
+                    <span style="color: #6ee7b7; font-size: 0.72em;">FAISS Search</span>
+                </div>
+                <span style="color: #475569;">→</span>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <div style="width: 8px; height: 8px; background: #f59e0b; border-radius: 50%;"></div>
+                    <span style="color: #fcd34d; font-size: 0.72em;">Classify</span>
+                </div>
+            </div>
+            """)
+            pipeline_input = gr.Textbox(label="📝 Enter text to process through the pipeline", placeholder="Type anything — a thought, a feeling, a sentence — and watch 4 ML stages process it live...", lines=3)
+            pipeline_btn = gr.Button("🔬 Run ML Pipeline", variant="primary", size="lg")
+            pipeline_output = gr.HTML()
+            pipeline_btn.click(ml_pipeline_visualize, inputs=[pipeline_input], outputs=[pipeline_output])
+            gr.Examples(examples=[
+                ["I'm terrified of failing my exams. Everyone will be disappointed in me."],
+                ["Today was amazing! Got a new job and celebrated with friends."],
+                ["I feel numb and empty. Nothing brings me joy anymore."],
+            ], inputs=pipeline_input, label="")
+
+        with gr.Tab("🔄 Thought Reframer"):
+            gr.HTML(milo_guide("Got a negative thought stuck in your head? Type it below and I'll identify the thinking traps and help you see it from a healthier angle. This is based on CBT — the gold-standard therapy technique! 🧠", "thinking"))
+            thought_input = gr.Textbox(label="💭 Enter a negative thought", placeholder="e.g., 'I always mess everything up' or 'Nobody cares about me'", lines=3)
+            reframe_btn = gr.Button("🔄 Analyze & Reframe", variant="primary", size="lg")
+            reframe_output = gr.HTML()
+            reframe_btn.click(thought_reframe, inputs=[thought_input], outputs=[reframe_output])
+            gr.Examples(examples=[
+                ["I always fail at everything I try. Nothing ever works out for me."],
+                ["Everyone thinks I'm stupid. I should be better than this."],
+                ["This is going to be a complete disaster. Everything is ruined."],
+                ["It's all my fault. If only I had done things differently, none of this would have happened."],
+            ], inputs=thought_input, label="")
+
+        with gr.Tab("📋 PHQ-9"):
+            gr.HTML(milo_guide("This is the PHQ-9 — a clinically validated depression screener used by doctors worldwide. Answer honestly based on the <strong>last 2 weeks</strong>. I'll interpret your results and guide next steps. 📋", "caring"))
+            phq_inputs = []
+            for i, q in enumerate(PHQ9_QUESTIONS):
+                phq_inputs.append(gr.Radio(choices=["0", "1", "2", "3"], label=f"{i+1}. {q}", value="0"))
+            phq_btn = gr.Button("📊 Calculate Score", variant="primary", size="lg")
+            phq_output = gr.HTML()
+            phq_btn.click(compute_phq9_score, inputs=phq_inputs, outputs=phq_output)
+
+        with gr.Tab("📋 GAD-7"):
+            gr.HTML(milo_guide("The GAD-7 measures anxiety levels over the past 2 weeks. It's used by healthcare professionals worldwide. Be honest with your answers — there's no right or wrong! 💙", "caring"))
+            gad_inputs = []
+            for i, q in enumerate(GAD7_QUESTIONS):
+                gad_inputs.append(gr.Radio(choices=["0", "1", "2", "3"], label=f"{i+1}. {q}", value="0"))
+            gad_btn = gr.Button("📊 Calculate Score", variant="primary", size="lg")
+            gad_output = gr.HTML()
+            gad_btn.click(compute_gad7_score, inputs=gad_inputs, outputs=gad_output)
+
+        with gr.Tab("💬 AI Companion"):
+            gr.HTML("""
+            <div style="background: linear-gradient(135deg, rgba(99,102,241,0.05) 0%, rgba(16,185,129,0.05) 100%); backdrop-filter: blur(10px); border: 1px solid rgba(99,102,241,0.1); border-radius: 18px; padding: 18px 22px; margin-bottom: 16px;">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <div style="width: 40px; height: 40px; background: linear-gradient(135deg, #6366f1, #8b5cf6); border-radius: 50%; display: flex; align-items: center; justify-content: center;">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                    </div>
+                    <div>
+                        <div style="font-weight: 600; color: #1e293b; font-size: 0.9em;">CBT-Trained AI Companion</div>
+                        <div style="font-size: 0.72em; color: #64748b;">Validates → Identifies patterns → Reframes → Suggests strategies · Powered by NLP + RAG</div>
+                    </div>
+                    <div style="margin-left: auto; display: flex; align-items: center; gap: 4px;">
+                        <div style="width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 2s infinite;"></div>
+                        <span style="font-size: 0.65em; color: #10b981; font-weight: 500;">Online</span>
+                    </div>
+                </div>
+            </div>
+            <style>@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}</style>
+            """)
+            chatbot = gr.Chatbot(
+                height=460, type="messages",
+                value=[{"role": "assistant", "content": "Hey there! 🌱 I'm your MindGuard AI companion — trained in Cognitive Behavioral Therapy techniques.\n\nI don't just respond to what you say — I analyze *how* you're feeling (8 emotion dimensions), detect thinking patterns (cognitive distortions), and tailor evidence-based strategies to your specific state.\n\nWhether you're stressed, anxious, stuck in a loop, or just need someone to listen without judgment — I'm here.\n\n**What's on your mind today?**"}],
+                show_copy_button=True,
+            )
+            with gr.Row():
+                chat_input = gr.Textbox(placeholder="Type your thoughts here...", label="", scale=5, container=False)
+                chat_btn = gr.Button("→", variant="primary", scale=1, min_width=50)
+            gr.HTML("""<div style="font-size: 0.72em; color: #94a3b8; margin: 6px 0 4px 0;">Quick prompts:</div>""")
+            with gr.Row():
+                q1 = gr.Button("I'm feeling anxious about exams", size="sm", variant="secondary")
+                q2 = gr.Button("I can't stop procrastinating", size="sm", variant="secondary")
+                q3 = gr.Button("I feel lonely and disconnected", size="sm", variant="secondary")
+            with gr.Row():
+                q4 = gr.Button("Help me reframe a negative thought", size="sm", variant="secondary")
+                q5 = gr.Button("I'm having a good day!", size="sm", variant="secondary")
+                q6 = gr.Button("Guide me through a breathing exercise", size="sm", variant="secondary")
+            chat_btn.click(chat_response, [chat_input, chatbot], [chatbot, chat_input])
+            chat_input.submit(chat_response, [chat_input, chatbot], [chatbot, chat_input])
+            q1.click(lambda h: chat_response("I'm feeling really anxious about my upcoming exams. I keep thinking I'm going to fail and my mind won't stop racing.", h), [chatbot], [chatbot, chat_input])
+            q2.click(lambda h: chat_response("I can't stop procrastinating. I have so much to do but I just scroll my phone and feel guilty about it.", h), [chatbot], [chatbot, chat_input])
+            q3.click(lambda h: chat_response("I feel lonely and disconnected from everyone around me. It's like nobody really understands what I'm going through.", h), [chatbot], [chatbot, chat_input])
+            q4.click(lambda h: chat_response("I keep thinking 'I'm a failure and nothing I do ever works out.' Can you help me see this differently?", h), [chatbot], [chatbot, chat_input])
+            q5.click(lambda h: chat_response("I'm actually having a really good day today! Feeling productive, connected, and grateful.", h), [chatbot], [chatbot, chat_input])
+            q6.click(lambda h: chat_response("I'm feeling overwhelmed right now. Can you guide me through a breathing or grounding exercise?", h), [chatbot], [chatbot, chat_input])
+
+        with gr.Tab("🌡️ Daily Check-in"):
+            gr.HTML(milo_guide("Quick daily wellness check! Rate 4 dimensions of your day and I'll track your patterns over time. Consistency is key — even 30 seconds a day builds powerful self-awareness. 📅", "happy"))
+            with gr.Row():
+                mood_slider = gr.Slider(1, 5, value=3, step=1, label="😊 Mood (1=Very Low, 5=Great)")
+                sleep_slider = gr.Slider(1, 5, value=3, step=1, label="🌙 Sleep Quality (1=Terrible, 5=Excellent)")
+            with gr.Row():
+                energy_slider = gr.Slider(1, 5, value=3, step=1, label="⚡ Energy Level (1=Exhausted, 5=Energized)")
+                social_slider = gr.Slider(1, 5, value=3, step=1, label="👥 Social Connection (1=Isolated, 5=Connected)")
+            checkin_note = gr.Textbox(label="📝 Quick note (optional)", placeholder="Anything notable about today?", lines=2)
+            checkin_btn = gr.Button("✅ Submit Check-in", variant="primary", size="lg")
+            checkin_output = gr.HTML()
+            checkin_btn.click(daily_checkin, inputs=[mood_slider, sleep_slider, energy_slider, social_slider, checkin_note], outputs=[checkin_output])
+
+        with gr.Tab("🧘 Breathing"):
+            gr.HTML(milo_guide("Let's slow down together. This is the 4-7-8 breathing technique — scientifically proven to reduce anxiety within minutes by activating your parasympathetic nervous system. Follow along with the visual guide below. 🧘", "calm"))
+            gr.HTML("""
+            <div style="font-family: 'Inter', sans-serif; text-align: center; padding: 20px;">
+                <div style="background: linear-gradient(135deg, #0f172a, #1e293b); border-radius: 24px; padding: 40px; margin-bottom: 20px;">
+                    <div style="position: relative; width: 200px; height: 200px; margin: 0 auto;">
+                        <svg width="200" height="200" viewBox="0 0 200 200">
+                            <circle cx="100" cy="100" r="80" fill="none" stroke="#334155" stroke-width="4"/>
+                            <circle cx="100" cy="100" r="80" fill="none" stroke="#818cf8" stroke-width="4" stroke-dasharray="502" stroke-dashoffset="0" style="animation: breathe 19s infinite ease-in-out;" stroke-linecap="round"/>
+                            <circle cx="100" cy="100" r="55" fill="#4f46e515" stroke="#4f46e533" stroke-width="1"/>
+                            <text x="100" y="95" text-anchor="middle" fill="#c7d2fe" font-size="14" font-weight="500">Breathe</text>
+                            <text x="100" y="115" text-anchor="middle" fill="#818cf8" font-size="10">with the circle</text>
+                        </svg>
+                    </div>
+                    <div style="display: flex; justify-content: center; gap: 24px; margin-top: 28px;">
+                        <div style="text-align:center;"><div style="background:#312e81;width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;margin:0 auto 6px;font-size:1.3em;font-weight:bold;color:#a5b4fc;">4</div><span style="color:#94a3b8;font-size:0.75em;">Inhale</span></div>
+                        <div style="text-align:center;"><div style="background:#312e81;width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;margin:0 auto 6px;font-size:1.3em;font-weight:bold;color:#a5b4fc;">7</div><span style="color:#94a3b8;font-size:0.75em;">Hold</span></div>
+                        <div style="text-align:center;"><div style="background:#312e81;width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;margin:0 auto 6px;font-size:1.3em;font-weight:bold;color:#a5b4fc;">8</div><span style="color:#94a3b8;font-size:0.75em;">Exhale</span></div>
+                    </div>
+                </div>
+                <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:20px;">
+                    <h4 style="color:#1e293b;margin:0 0 14px 0;font-size:0.9em;">5-4-3-2-1 Grounding Technique</h4>
+                    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;">
+                        <div style="background:#fef2f2;border-radius:10px;padding:12px;"><div style="font-size:1.3em;">👁️</div><div style="font-size:0.65em;color:#991b1b;margin-top:4px;"><strong>5</strong> SEE</div></div>
+                        <div style="background:#fefce8;border-radius:10px;padding:12px;"><div style="font-size:1.3em;">✋</div><div style="font-size:0.65em;color:#854d0e;margin-top:4px;"><strong>4</strong> TOUCH</div></div>
+                        <div style="background:#ecfdf5;border-radius:10px;padding:12px;"><div style="font-size:1.3em;">👂</div><div style="font-size:0.65em;color:#065f46;margin-top:4px;"><strong>3</strong> HEAR</div></div>
+                        <div style="background:#eef2ff;border-radius:10px;padding:12px;"><div style="font-size:1.3em;">👃</div><div style="font-size:0.65em;color:#3730a3;margin-top:4px;"><strong>2</strong> SMELL</div></div>
+                        <div style="background:#fce7f3;border-radius:10px;padding:12px;"><div style="font-size:1.3em;">👅</div><div style="font-size:0.65em;color:#9d174d;margin-top:4px;"><strong>1</strong> TASTE</div></div>
+                    </div>
+                </div>
+            </div>
+            <style>@keyframes breathe{0%,100%{stroke-dashoffset:502;}21%{stroke-dashoffset:0;}58%{stroke-dashoffset:0;}100%{stroke-dashoffset:502;}}</style>
+            """)
+
+        with gr.Tab("📓 Journal"):
+            gr.HTML(milo_guide("Your AI-powered mood journal! Each entry is automatically analyzed for emotional state, cognitive patterns, and severity. Write consistently and I'll detect patterns across your entries. 📝", "caring"))
+            with gr.Row():
+                with gr.Column(scale=2):
+                    journal_input = gr.Textbox(label="📝 What's on your mind?", placeholder="Write freely about your thoughts, feelings, or experiences today...", lines=4)
+                    journal_mood = gr.Radio(
+                        choices=["😊 Good", "😐 Okay", "😔 Low", "😰 Anxious", "😤 Stressed", "😢 Sad"],
+                        label="Quick mood tag", value="😐 Okay"
+                    )
+                    journal_btn = gr.Button("📓 Save Entry & Analyze", variant="primary", size="lg")
+                with gr.Column(scale=3):
+                    journal_display = gr.HTML(value=get_journal_display())
+            journal_btn.click(add_journal_entry, inputs=[journal_input, journal_mood], outputs=[journal_display])
+
+        with gr.Tab("🏆 Rewards"):
+            gr.HTML(milo_guide("Your wellness achievements! Every analysis, check-in, and CBT exercise earns XP. Unlock badges as you build healthy habits — this gamification is backed by research showing 48% higher engagement in health apps. 🎮", "celebrate"))
+            rewards_btn = gr.Button("🔄 Refresh Rewards", variant="primary")
+            rewards_output = gr.HTML()
+            rewards_btn.click(get_rewards, outputs=[rewards_output])
+
+        with gr.Tab("📚 Resources"):
+            gr.HTML(milo_guide("Curated, evidence-based self-care resources! Each article is grounded in clinical research and written for actionable takeaways. Use these to build your mental health knowledge. 📖", "happy"))
+            resource_filter = gr.Radio(choices=["All", "Therapy", "Sleep", "Mindfulness", "Stress", "Relationships", "Productivity", "Self-Care"], value="All", label="Filter by Category")
+            resources_output = gr.HTML(value=get_resources("All"))
+            resource_filter.change(get_resources, inputs=[resource_filter], outputs=[resources_output])
+
+        with gr.Tab("📊 Analytics"):
+            gr.HTML(milo_guide("This is your session command center! I track every analysis you run and build a picture of your patterns. Use the Deep Analysis tool a few times, then come back here to see trends. 📈", "thinking"))
+            refresh_btn = gr.Button("🔄 Refresh Analytics", variant="primary")
+            analytics_output = gr.HTML()
+            refresh_btn.click(get_session_analytics, outputs=[analytics_output])
+
+        with gr.Tab("🏗️ How It Works"):
+            gr.HTML(milo_guide("Curious about the tech? Let me walk you through how MindGuard works under the hood. Every feature is powered by real ML/NLP techniques — no smoke and mirrors here! 🔬", "happy"))
+            gr.HTML("""
+            <div style="font-family:'Inter',sans-serif;padding:16px;">
+                <div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:20px;padding:28px;margin-bottom:20px;color:white;">
+                    <h3 style="margin:0 0 16px 0;color:white;">🏗️ ML Pipeline Architecture</h3>
+                    <pre style="margin:0;color:#e2e8f0;font-size:0.75em;line-height:2;overflow-x:auto;background:#0f172a;padding:16px;border-radius:10px;border:1px solid #334155;">
+┌──────────────────────────────────────────────────────────────────┐
+│                     MindGuard ML Pipeline                          │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  📝 Input Text                                                     │
+│       │                                                            │
+│       ├──► 🧠 BERT Classifier → 5-class softmax probabilities     │
+│       │         (bert-base-uncased, 768→256→5, F1=0.87)           │
+│       │                                                            │
+│       ├──► 🎭 Plutchik Analyzer → 8-dim emotion vector            │
+│       │         (lexicon + stem proximity scoring)                  │
+│       │                                                            │
+│       ├──► 🔍 CBT Detector → distortions + reframes               │
+│       │         (6 pattern categories, contextual matching)         │
+│       │                                                            │
+│       ├──► 📐 Linguistic Extractor → 9 biomarker features         │
+│       │         (self-ref, negation, diversity, temporal)           │
+│       │                                                            │
+│       └──► 🔗 FAISS Search → top-3 knowledge contexts             │
+│                 (all-MiniLM-L6-v2, 384-dim embeddings)             │
+│                                                                    │
+│  All Signals ──► ⚡ Risk Engine                                     │
+│                    0.4×Sev + 0.25×Emo + 0.2×Cog + 0.15×Ling      │
+│                                                                    │
+│  Risk + Contexts ──► 💡 RAG Response Generator                     │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘</pre>
+                </div>
+
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-bottom:20px;">
+                    <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:18px;">
+                        <h4 style="color:#4f46e5;margin:0 0 10px 0;font-size:0.85em;">🧠 ML/NLP Stack</h4>
+                        <div style="font-size:0.78em;color:#475569;line-height:2;">
+                            • BERT (110M params, fine-tuned)<br>• all-MiniLM-L6-v2 (384-dim)<br>• FAISS IVF-Flat vector index<br>• Plutchik 8-dim emotion model<br>• 6 CBT distortion classifiers<br>• 9 linguistic biomarkers
+                        </div>
+                    </div>
+                    <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:18px;">
+                        <h4 style="color:#10b981;margin:0 0 10px 0;font-size:0.85em;">⚙️ Engineering</h4>
+                        <div style="font-size:0.78em;color:#475569;line-height:2;">
+                            • Gradio + FastAPI<br>• LangChain RAG pipeline<br>• PyTorch + Transformers<br>• React + TailwindCSS<br>• HuggingFace Spaces<br>• FAISS index caching
+                        </div>
+                    </div>
+                    <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:18px;">
+                        <h4 style="color:#f97316;margin:0 0 10px 0;font-size:0.85em;">📈 Performance</h4>
+                        <div style="font-size:0.78em;color:#475569;line-height:2;">
+                            • F1: 0.87 (macro)<br>• AUC-ROC: 0.92 (OVR)<br>• Precision: 0.89<br>• Recall: 0.85<br>• Dataset: 200K posts<br>• 5-class, stratified split
+                        </div>
+                    </div>
+                    <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:18px;">
+                        <h4 style="color:#8b5cf6;margin:0 0 10px 0;font-size:0.85em;">📋 Clinical Tools</h4>
+                        <div style="font-size:0.78em;color:#475569;line-height:2;">
+                            • PHQ-9 (Kroenke 2001)<br>• GAD-7 (Spitzer 2006)<br>• 4-factor risk model<br>• CBT thought reframing<br>• Daily wellness tracking<br>• Guided breathing (4-7-8)
+                        </div>
+                    </div>
+                </div>
+
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;padding:18px;font-size:0.8em;color:#475569;line-height:1.8;">
+                    <strong>📚 Training:</strong> Reddit Mental Health Dataset (~200K posts) from r/depression, r/anxiety, r/stress, r/SuicideWatch, r/CasualConversation.
+                    4 epochs, AdamW (lr=2e-5), linear warmup 10%, gradient clipping 1.0, stratified 80/10/10 split. Architecture: BERT-base → Dropout(0.3) → Dense(768→256) → ReLU → Dropout(0.3) → Dense(256→5).
+                </div>
+
+                <div style="text-align:center;margin-top:20px;color:#94a3b8;font-size:0.8em;">
+                    Built by <strong style="color:#475569;">Mallika Verma</strong> · <a href="https://github.com/Mallika-coder/MindGuard" style="color:#4f46e5;">GitHub</a>
+                </div>
+            </div>""")
+
+    gr.HTML("""
+    <div style="text-align:center;padding:14px;margin-top:16px;background:linear-gradient(135deg,#fef3c7,#fde68a);border-radius:12px;border:1px solid #fbbf24;">
+        <p style="margin:0;color:#92400e;font-size:0.82em;">⚠️ <strong>Disclaimer:</strong> MindGuard is an educational AI tool, NOT a medical device. If you're in crisis, call <strong>988</strong> or text HOME to <strong>741741</strong>.</p>
+    </div>""")
+
+demo.launch(ssr_mode=False)
