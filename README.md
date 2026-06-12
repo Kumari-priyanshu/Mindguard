@@ -14,7 +14,7 @@ license: mit
 
 > Multi-dimensional NLP analysis combining fine-tuned BERT classification, Plutchik emotion modeling, cognitive distortion detection, and RAG-enhanced clinical responses — with validated PHQ-9 and GAD-7 instruments for standardized screening.
 
-**Live Demo:** [https://huggingface.co/spaces/MallikaV/MindGuard](https://huggingface.co/spaces/MallikaV/MindGuard)
+**Live Demo:** [https://huggingface.co/spaces/endorpheen/Mindguard](https://huggingface.co/spaces/endorpheen/Mindguard)
 
 ---
 
